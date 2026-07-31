@@ -13,8 +13,14 @@
       "architecture": "x64",
       "binaryDir": "${sourceDir}/out/build/vs2022-x64",
       "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "C:/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools/VC/vcpkg/scripts/buildsystems/vcpkg.cmake",
         "CMAKE_PREFIX_PATH": "C:/Qt/Qt5.12.12/5.12.12/msvc2017_64",
         "CMAKE_SYSTEM_VERSION": "10.0.22621.0",
+        "VCPKG_MANIFEST_INSTALL": "OFF",
+        "VCPKG_TARGET_TRIPLET": "x64-windows",
+        "VCPKG_INSTALLED_DIR": "${sourceDir}/out/vcpkg_installed",
+        "VCPKG_OVERLAY_PORTS": "${sourceDir}/third_party/vcpkg-overlays",
+        "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=C:/Users/cisco/AppData/Local/MegaVideoProtect/vcpkg-buildtrees;--x-packages-root=C:/Users/cisco/AppData/Local/MegaVideoProtect/vcpkg-packages",
         "MVP_BUILD_APP": "ON",
         "MVP_BUILD_TESTS": "ON"
       }

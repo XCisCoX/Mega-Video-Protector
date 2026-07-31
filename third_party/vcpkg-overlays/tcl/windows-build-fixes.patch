@@ -1,0 +1,34 @@
+diff --git a/win/makefile.vc b/win/makefile.vc
+--- a/win/makefile.vc
++++ b/win/makefile.vc
+@@ -626,1 +626,1 @@
+-	@if not exist $(HTMLDIR)\nul mkdir $(HTMLDIR)
++	@if not exist "$(HTMLDIR)\nul" mkdir "$(HTMLDIR)"
+@@ -869,10 +869,8 @@ install-binaries:
+ 	@$(CPY) "$(TCLLIB)" "$(BIN_INSTALL_DIR)\"
+ !endif
+ 	@$(CPY) "$(TCLIMPLIB)" "$(LIB_INSTALL_DIR)\"
+-!if exist($(TCLSH))
+ 	@echo Installing $(TCLSHNAME)
+ 	@$(CPY) "$(TCLSH)" "$(BIN_INSTALL_DIR)\"
+-!endif
+ 	@echo Installing $(TCLSTUBLIBNAME)
+ 	@$(CPY) "$(TCLSTUBLIB)" "$(LIB_INSTALL_DIR)\"
+ 
+diff --git a/win/rules.vc b/win/rules.vc
+--- a/win/rules.vc
++++ b/win/rules.vc
+@@ -1603,2 +1603,2 @@
+-	@if not exist $(OUT_DIR)\nul mkdir $(OUT_DIR)
+-	@if not exist $(TMP_DIR)\nul mkdir $(TMP_DIR)
++	@if not exist "$(OUT_DIR)\nul" mkdir "$(OUT_DIR)"
++	@if not exist "$(TMP_DIR)\nul" mkdir "$(TMP_DIR)"
+@@ -1700,1 +1700,1 @@
+-{$(RCDIR)}.rc{$(TMP_DIR)}.res:
++{$(RCDIR)}.rc{$(TMP_DIR)}.res::
+@@ -1703,1 +1703,1 @@
+-{$(WIN_DIR)}.rc{$(TMP_DIR)}.res:
++{$(WIN_DIR)}.rc{$(TMP_DIR)}.res::
+@@ -1706,1 +1706,1 @@
+-{$(TMP_DIR)}.rc{$(TMP_DIR)}.res:
++{$(TMP_DIR)}.rc{$(TMP_DIR)}.res::

@@ -3,12 +3,11 @@
 namespace videovault::core {
 
 std::string_view version() noexcept {
-    return "0.1.0-phase1";
+    return "0.2.0-phase2";
 }
 
 bool is_crypto_available() noexcept {
-    // Phase 1 intentionally contains no cryptographic implementation.
-    return false;
+    return true;
 }
 
 } // namespace videovault::core

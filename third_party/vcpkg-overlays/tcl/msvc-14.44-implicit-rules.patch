@@ -1,0 +1,30 @@
+diff --git a/win/rules.vc b/win/rules.vc
+--- a/win/rules.vc
++++ b/win/rules.vc
+@@ -1677,22 +1677,22 @@ DISABLE_IMPLICIT_RULES = 0
+ # Implicit rule definitions - only for building library objects. For stubs and
+ # main application, the master makefile should define explicit rules.
+ 
+-{$(ROOT)}.c{$(TMP_DIR)}.obj::
++{$(ROOT)}.c{$(TMP_DIR)}.obj:
+ 	$(CCPKGCMD) @<<
+ $<
+ <<
+ 
+-{$(WIN_DIR)}.c{$(TMP_DIR)}.obj::
++{$(WIN_DIR)}.c{$(TMP_DIR)}.obj:
+ 	$(CCPKGCMD) @<<
+ $<
+ <<
+ 
+-{$(GENERICDIR)}.c{$(TMP_DIR)}.obj::
++{$(GENERICDIR)}.c{$(TMP_DIR)}.obj:
+ 	$(CCPKGCMD) @<<
+ $<
+ <<
+ 
+-{$(COMPATDIR)}.c{$(TMP_DIR)}.obj::
++{$(COMPATDIR)}.c{$(TMP_DIR)}.obj:
+ 	$(CCPKGCMD) @<<
+ $<
+ <<
