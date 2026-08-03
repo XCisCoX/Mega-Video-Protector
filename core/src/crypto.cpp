@@ -159,6 +159,31 @@ void random_bytes(const std::span<unsigned char> destination) noexcept {
     randombytes_buf(destination.data(), destination.size());
 }
 
+Sha256Digest sha256(const std::span<const unsigned char> data) {
+    Sha256Digest digest{};
+    crypto_hash_sha256(digest.data(), data.data(), data.size());
+    return digest;
+}
+
+Sha256Accumulator::Sha256Accumulator() {
+    crypto_hash_sha256_init(&state_);
+}
+
+void Sha256Accumulator::update(const std::span<const unsigned char> data) noexcept {
+    if (!finished_ && !data.empty()) {
+        crypto_hash_sha256_update(&state_, data.data(), data.size());
+    }
+}
+
+Sha256Digest Sha256Accumulator::digest() noexcept {
+    Sha256Digest digest{};
+    if (!finished_) {
+        crypto_hash_sha256_final(&state_, digest.data());
+        finished_ = true;
+    }
+    return digest;
+}
+
 Result<std::vector<unsigned char>> encrypt_xchacha20_poly1305(
     const std::span<const unsigned char> plaintext,
     const std::span<const unsigned char> associated_data,

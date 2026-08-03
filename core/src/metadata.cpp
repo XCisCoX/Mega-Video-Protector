@@ -103,15 +103,18 @@ Result<std::vector<unsigned char>> read_exact_file(
 
 } // namespace
 
-Result<VaultMetadata> create_metadata_header(const Argon2Parameters& parameters) {
+Result<VaultMetadata> create_metadata_header(
+    const Argon2Parameters& parameters,
+    const std::array<unsigned char, 16>& salt,
+    const std::array<unsigned char, 16>& vault_id) {
     if (!is_valid_argon2_parameters(parameters)) {
         return VaultError{VaultErrorCode::InvalidArgument, "invalid Argon2id parameters"};
     }
 
     VaultMetadata metadata;
     metadata.parameters = parameters;
-    random_bytes(metadata.salt);
-    random_bytes(metadata.vault_id);
+    metadata.salt = salt;
+    metadata.vault_id = vault_id;
 
     std::copy(kMetadataMagic.begin(), kMetadataMagic.end(), metadata.encoded.begin());
     write_u32_le(std::span(metadata.encoded).subspan(8U, 4U), kMetadataVersion);
@@ -123,6 +126,14 @@ Result<VaultMetadata> create_metadata_header(const Argon2Parameters& parameters)
     std::copy(metadata.salt.begin(), metadata.salt.end(), metadata.encoded.begin() + 32U);
     std::copy(metadata.vault_id.begin(), metadata.vault_id.end(), metadata.encoded.begin() + 48U);
     return metadata;
+}
+
+Result<VaultMetadata> create_metadata_header(const Argon2Parameters& parameters) {
+    std::array<unsigned char, 16> salt{};
+    std::array<unsigned char, 16> vault_id{};
+    random_bytes(salt);
+    random_bytes(vault_id);
+    return create_metadata_header(parameters, salt, vault_id);
 }
 
 Result<bool> seal_password_verifier(

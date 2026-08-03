@@ -6,6 +6,8 @@
 
 #include <QApplication>
 #include <QComboBox>
+#include <QDialog>
+#include <QDialogButtonBox>
 #include <QDir>
 #include <QEvent>
 #include <QFileDialog>
@@ -15,6 +17,7 @@
 #include <QHBoxLayout>
 #include <QLabel>
 #include <QLineEdit>
+#include <QListWidget>
 #include <QPushButton>
 #include <QSettings>
 #include <QStackedWidget>
@@ -131,6 +134,12 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
+    if (importWatcher_ != nullptr) {
+        importWatcher_->waitForFinished();
+    }
+    if (adminWatcher_ != nullptr) {
+        adminWatcher_->waitForFinished();
+    }
     if (vault_) {
         vault_->lock();
     }
@@ -271,10 +280,30 @@ QWidget* MainWindow::buildUnlockedPage() {
     layout->addWidget(unlockedLocation_);
     layout->addWidget(description(
         QStringLiteral("Automatic lock: 5 minutes after the last keyboard or mouse activity."), card));
+
+    gallery_ = new QListWidget(card);
+    gallery_->setObjectName(QStringLiteral("gallery"));
+    layout->addWidget(gallery_);
+
+    auto* importRow = new QHBoxLayout();
+    importButton_ = new QPushButton(QStringLiteral("Import video…"), card);
+    importButton_->setProperty("primary", true);
+    removeButton_ = new QPushButton(QStringLiteral("Remove selected"), card);
+    galleryStatus_ = errorLabel(card);
+    importRow->addWidget(importButton_);
+    importRow->addWidget(removeButton_);
+    importRow->addWidget(galleryStatus_, 1);
+    layout->addLayout(importRow);
+
+    changePasswordButton_ = new QPushButton(QStringLiteral("Change password…"), card);
     auto* lockButton = new QPushButton(QStringLiteral("Lock vault"), card);
     lockButton->setProperty("primary", true);
+    layout->addWidget(changePasswordButton_);
     layout->addWidget(lockButton);
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
+    connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
+    connect(removeButton_, &QPushButton::clicked, this, [this] { beginRemoveSelected(); });
+    connect(changePasswordButton_, &QPushButton::clicked, this, [this] { beginChangePassword(); });
     placeCard(page, card);
     return page;
 }
@@ -383,10 +412,205 @@ void MainWindow::finishOperation() {
         return;
     }
 
-    vault_ = std::move(outcome->vault);
+    vault_ = std::shared_ptr<core::Vault>(std::move(outcome->vault));
     QSettings settings;
     settings.setValue(QStringLiteral("vault/location"), textFromPath(vault_->root_path()));
     showUnlocked();
+}
+
+void MainWindow::beginImport() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+    const QString selected = QFileDialog::getOpenFileName(
+        this, QStringLiteral("Import video"), {},
+        QStringLiteral("Video files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v);;All files (*)"));
+    if (selected.isEmpty()) {
+        return;
+    }
+
+    const auto vault = vault_;
+    const auto source = std::make_shared<std::filesystem::path>(pathFromText(selected));
+    importButton_->setEnabled(false);
+    galleryStatus_->setText(QStringLiteral("Importing…"));
+    galleryStatus_->setVisible(true);
+    importWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
+    connect(importWatcher_, &QFutureWatcherBase::finished, this, [this] { finishImport(); });
+    importWatcher_->setFuture(QtConcurrent::run([vault, source] {
+        return std::make_shared<core::Result<std::int64_t>>(vault->import_file(*source));
+    }));
+}
+
+void MainWindow::finishImport() {
+    auto* completed = importWatcher_;
+    importWatcher_ = nullptr;
+    const auto outcome = *completed->result();
+    completed->deleteLater();
+    importButton_->setEnabled(true);
+
+    if (!outcome) {
+        const QString message =
+            QString::fromUtf8(core::user_message(outcome.error().code).data());
+        setError(galleryStatus_, message);
+        return;
+    }
+    refreshGallery();
+}
+
+void MainWindow::refreshGallery() {
+    gallery_->clear();
+    setError(galleryStatus_, {});
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    const auto vault = vault_;
+    auto* watcher = new QFutureWatcher<std::vector<core::VideoInfo>>(this);
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, vault, watcher] {
+        if (vault_ != vault || !vault_->is_unlocked()) {
+            watcher->deleteLater();
+            return;
+        }
+        const auto videos = watcher->result();
+        for (const auto& video : videos) {
+            const QString label = QStringLiteral("%1  (%2 bytes)")
+                .arg(QString::fromStdString(video.display_name))
+                .arg(static_cast<qulonglong>(video.original_size));
+            auto* item = new QListWidgetItem(label);
+            item->setData(Qt::UserRole, static_cast<qlonglong>(video.id));
+            gallery_->addItem(item);
+        }
+        if (videos.empty()) {
+            setError(galleryStatus_, QStringLiteral("No videos imported yet."));
+        }
+        watcher->deleteLater();
+    });
+    watcher->setFuture(QtConcurrent::run([vault] {
+        auto videos = vault->list_videos();
+        if (!videos) {
+            return std::vector<core::VideoInfo>{};
+        }
+        return videos.value();
+    }));
+}
+
+void MainWindow::beginRemoveSelected() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    auto* item = gallery_->currentItem();
+    if (item == nullptr) {
+        setError(galleryStatus_, QStringLiteral("Select a video to remove."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    const auto video_id = item->data(Qt::UserRole).toLongLong();
+    const auto vault = vault_;
+    importButton_->setEnabled(false);
+    removeButton_->setEnabled(false);
+    changePasswordButton_->setEnabled(false);
+    adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
+    connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishRemoveSelected(); });
+    adminWatcher_->setFuture(QtConcurrent::run([vault, video_id] {
+        return std::make_shared<core::Result<bool>>(vault->remove_video(video_id));
+    }));
+}
+
+void MainWindow::finishRemoveSelected() {
+    auto* completed = adminWatcher_;
+    adminWatcher_ = nullptr;
+    const auto outcome = *completed->result();
+    completed->deleteLater();
+    importButton_->setEnabled(true);
+    removeButton_->setEnabled(true);
+    changePasswordButton_->setEnabled(true);
+    if (!outcome || !outcome.value()) {
+        const QString message =
+            QString::fromUtf8(core::user_message(outcome.error().code).data());
+        setError(galleryStatus_, message);
+        return;
+    }
+    refreshGallery();
+}
+
+void MainWindow::beginChangePassword() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Change vault password"));
+    dialog.setModal(true);
+    auto* form = new QFormLayout(&dialog);
+    auto* current = new QLineEdit(&dialog);
+    current->setEchoMode(QLineEdit::Password);
+    auto* next = new QLineEdit(&dialog);
+    next->setEchoMode(QLineEdit::Password);
+    auto* confirmation = new QLineEdit(&dialog);
+    confirmation->setEchoMode(QLineEdit::Password);
+    auto* profile = new QComboBox(&dialog);
+    profile->addItem(QStringLiteral("Balanced — 256 MiB, 3 iterations"));
+    profile->addItem(QStringLiteral("High security — 512 MiB, 4 iterations"));
+    form->addRow(QStringLiteral("Current password"), current);
+    form->addRow(QStringLiteral("New password"), next);
+    form->addRow(QStringLiteral("Confirm new password"), confirmation);
+    form->addRow(QStringLiteral("Argon2id security profile"), profile);
+    auto* buttons = new QDialogButtonBox(
+        QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    form->addRow(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    if (dialog.exec() != QDialog::Accepted) {
+        return;
+    }
+    if (next->text() != confirmation->text()) {
+        setError(galleryStatus_, QStringLiteral("The new password confirmation does not match."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+
+    const auto vault = vault_;
+    const auto current_text =
+        std::make_shared<std::string>(current->text().toUtf8().constData());
+    const auto next_text =
+        std::make_shared<std::string>(next->text().toUtf8().constData());
+    const auto parameters = selectedParameters(profile->currentIndex());
+    current->clear();
+    next->clear();
+    confirmation->clear();
+
+    importButton_->setEnabled(false);
+    removeButton_->setEnabled(false);
+    changePasswordButton_->setEnabled(false);
+    galleryStatus_->setText(QStringLiteral("Changing password…"));
+    galleryStatus_->setVisible(true);
+    adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
+    connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishChangePassword(); });
+    adminWatcher_->setFuture(QtConcurrent::run([vault, current_text, next_text, parameters] {
+        auto result = vault->change_password(*current_text, *next_text, parameters);
+        clearSecret(*current_text);
+        clearSecret(*next_text);
+        return std::make_shared<core::Result<bool>>(std::move(result));
+    }));
+}
+
+void MainWindow::finishChangePassword() {
+    auto* completed = adminWatcher_;
+    adminWatcher_ = nullptr;
+    const auto outcome = *completed->result();
+    completed->deleteLater();
+    importButton_->setEnabled(true);
+    removeButton_->setEnabled(true);
+    changePasswordButton_->setEnabled(true);
+    if (!outcome || !outcome.value()) {
+        const QString message =
+            QString::fromUtf8(core::user_message(outcome.error().code).data());
+        setError(galleryStatus_, message);
+        return;
+    }
+    setError(galleryStatus_, QStringLiteral("Password changed."));
+    galleryStatus_->setVisible(true);
 }
 
 void MainWindow::setBusy(const bool busy) {
@@ -427,6 +651,7 @@ void MainWindow::showUnlocked() {
         QStringLiteral("Vault location: %1").arg(textFromPath(vault_->root_path())));
     pages_->setCurrentIndex(kUnlockedPage);
     resetAutoLock();
+    refreshGallery();
 }
 
 void MainWindow::lockVault() {
@@ -437,6 +662,10 @@ void MainWindow::lockVault() {
         vault_->lock();
         vault_.reset();
     }
+    importButton_->setEnabled(true);
+    removeButton_->setEnabled(true);
+    changePasswordButton_->setEnabled(true);
+    gallery_->clear();
     showLogin(root);
 }
 

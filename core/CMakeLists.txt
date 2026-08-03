@@ -22,6 +22,7 @@ add_library(VideoVaultCore STATIC
     src/crypto.cpp
     src/database.cpp
     src/metadata.cpp
+    src/package.cpp
     src/vault.cpp
     src/version.cpp
 )

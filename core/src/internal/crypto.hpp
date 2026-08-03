@@ -2,6 +2,8 @@
 
 #include "videovault/core/vault.hpp"
 
+#include <sodium.h>
+
 #include <array>
 #include <cstddef>
 #include <cstdint>
@@ -54,6 +56,22 @@ private:
     const std::array<char, 8>& context);
 
 void random_bytes(std::span<unsigned char> destination) noexcept;
+
+using Sha256Digest = std::array<unsigned char, 32>;
+
+[[nodiscard]] Sha256Digest sha256(std::span<const unsigned char> data);
+
+class Sha256Accumulator final {
+public:
+    Sha256Accumulator();
+
+    void update(std::span<const unsigned char> data) noexcept;
+    [[nodiscard]] Sha256Digest digest() noexcept;
+
+private:
+    crypto_hash_sha256_state state_{};
+    bool finished_{false};
+};
 
 [[nodiscard]] Result<std::vector<unsigned char>> encrypt_xchacha20_poly1305(
     std::span<const unsigned char> plaintext,

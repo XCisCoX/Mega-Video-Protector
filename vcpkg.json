@@ -6,6 +6,16 @@
   "dependencies": [
     "argon2",
     "libsodium",
-    "sqlcipher"
+    "sqlcipher",
+    {
+      "name": "ffmpeg",
+      "default-features": false,
+      "features": [
+        "avcodec",
+        "avformat",
+        "swscale",
+        "ffmpeg"
+      ]
+    }
   ]
 }

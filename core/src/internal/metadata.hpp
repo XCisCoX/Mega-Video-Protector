@@ -24,6 +24,11 @@ struct VaultMetadata {
 
 [[nodiscard]] Result<VaultMetadata> create_metadata_header(
     const Argon2Parameters& parameters);
+
+[[nodiscard]] Result<VaultMetadata> create_metadata_header(
+    const Argon2Parameters& parameters,
+    const std::array<unsigned char, 16>& salt,
+    const std::array<unsigned char, 16>& vault_id);
 [[nodiscard]] Result<bool> seal_password_verifier(
     VaultMetadata& metadata,
     const SensitiveBuffer& verifier_key);
