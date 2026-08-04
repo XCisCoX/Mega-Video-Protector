@@ -109,6 +109,22 @@ The generated Visual Studio solution is under `out/build/vs2022-x64` and support
 - **Worker-thread decode pipeline.** Playback no longer decodes on the UI thread: a dedicated worker thread streams through `MediaDecoder` (blocking cache refills and frame scaling now happen off the UI), publishes each frame to a thread-safe slot, and appends decoded PCM directly to the audio sink (thread-safe). The UI thread only paints the latest frame, drives the seek bar, and owns the audio device. Pacing is driven by a monotonic real-time clock (`QElapsedTimer`) with the audio device as A/V master when the clocks drift >250 ms — decode speed and window size can no longer speed up or stall the video, which fixes both the "pause/play every 0.1 s" freezing (UI never blocks) and "smaller window = faster video" (pacing no longer follows the device's processed-time count, which previously leapt whenever the UI decoded fast).
 - **Performance pass (one-scale decode + direct paint).** Two heavy costs removed from the frame path. (1) `MediaDecoder` now converts frames straight to the display size: the worker tells it the surface size (`set_display_size`) and sws scales decode→surface in a single pass (rebuilt only on resize) — previously the pipeline did decode-scale to source size AND a second QImage scale per frame. (2) The player surface is a custom `VideoSurface` widget that paints the (already display-sized) frame directly with `QPainter::drawImage` — the old QLabel path did a `QPixmap::fromImage` deep copy (8 MB for 1080p) plus another scale per frame. Pacing no longer reads Qt's flaky `processedUSecs` clock at all (it throttled video whenever the UI thread was busy): the worker holds video only when the audio sink exceeds ~0.8 s of buffered samples, which keeps A/V locked without letting a busy UI or a slow device clock slow the picture. This fixes the "1080p plays at 4–10 fps / fewer frames than the video" report: at default window size the video is now decoded at ~window resolution (e.g. 960x540) in one scale, and fullscreen needs no scaling at all.
 
+- **Seek fixes.** Scrub-to-position is repaired: the UI tick no longer overwrites the slider while the thumb is being dragged (that made the slider snap back and look like the seek never happened), a live position preview shows while dragging, and a manual seek clears the ended state — previously, after a video finished, the tick kept forcing the slider to the end and pressing Play force-restarted from 0. The playback test now asserts the first post-seek frame is at/near the target, guarding against silent seek-to-start.
+
+## Releases (GitHub Actions)
+
+`.github/workflows/release.yml` builds a Windows x64 Release package on GitHub and publishes it as a GitHub Release. Two ways to trigger it:
+
+1. **Manual** — GitHub → Actions → "Release" → *Run workflow* → optionally type a version (e.g. `0.4.0`; empty = auto `vYYYY.MM.DD.HHMM`). The workflow creates the tag itself.
+2. **Tag push** — `git tag v0.4.0 && git push origin v0.4.0`.
+
+What it does: fresh vcpkg bootstrap (the repo pins baseline `b1b19307…`), installs argon2/libsodium/sqlcipher/ffmpeg (lean, with `swresample`), regenerates the FFmpeg import libraries from the DLL export tables (vcpkg's are stubs — same step local builds require), configures with the `vs2022-x64` preset overridden for CI paths (Qt from `jurplel/install-qt-action`, space-free `RUNNER_TEMP` install root), builds **Release**, runs all 7 ctest suites, and attaches `MegaVideoProtect-windows-x64.zip` (exe + Qt runtime via `windeployqt` + the five FFmpeg DLLs) to the release.
+
+Notes:
+- The Release configuration is verified locally before shipping (see the test targets); the workflow mirrors the local build chain, so a green local build+ctest is a strong predictor of a green CI run.
+- The first CI run also validates the pieces that only exist on the runner (fresh vcpkg clone resolving the pinned baseline, `windeployqt` output, Release link).
+- Requires the repository to be on GitHub with Actions enabled; push the workflow file with the rest of your commit.
+
 ## Current targets
 
 - `VideoVaultCore`: Qt-independent C++20 static library

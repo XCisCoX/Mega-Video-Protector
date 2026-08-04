@@ -146,8 +146,19 @@ PlayerWindow::PlayerWindow(
     layout->addWidget(controlsBar_);
 
     connect(playButton_, &QPushButton::clicked, this, [this] { togglePlayPause(); });
+    connect(positionSlider_, &QSlider::sliderPressed, this, [this] {
+        seeking_.store(true);
+    });
+    connect(positionSlider_, &QSlider::valueChanged, this, [this](const int value) {
+        if (seeking_.load()) {
+            // Live position preview while dragging.
+            positionLabel_->setText(QStringLiteral("%1 / %2")
+                .arg(formatTime(value), formatTime(durationMs_.load())));
+        }
+    });
     connect(positionSlider_, &QSlider::sliderReleased, this, [this] {
         doSeek(positionSlider_->value());
+        seeking_.store(false);
     });
     connect(volumeSlider_, &QSlider::valueChanged, this, [this](const int value) {
         volumePercent_ = value;
@@ -402,6 +413,10 @@ void PlayerWindow::requestSeek(const std::int64_t target_ms) {
 }
 
 void PlayerWindow::doSeek(const std::int64_t target_ms) {
+    // A manual seek means the video is no longer "ended" — otherwise the
+    // tick would keep snapping the slider to the end and pressing Play after
+    // the video had finished would force a restart from 0.
+    ended_.store(false);
     requestSeek(target_ms);
     if (audioSink_ != nullptr) {
         audioSink_->clear();
@@ -567,11 +582,16 @@ void PlayerWindow::tick() {
     }
 
     const std::int64_t pts = playheadMs_.load();
-    positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
-        pts, positionSlider_->maximum())));
+    // Never fight the user's slider drag: the tick must not overwrite the
+    // position while the thumb is being moved (that made scrubbing snap back
+    // and look like the seek never happened).
+    if (!seeking_.load()) {
+        positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
+            pts, positionSlider_->maximum())));
+    }
     updatePositionLabel();
 
-    if (ended_.load() && duration > 0) {
+    if (ended_.load() && duration > 0 && !seeking_.load()) {
         playButton_->setText(QStringLiteral("Play"));
         positionSlider_->setValue(positionSlider_->maximum());
     }

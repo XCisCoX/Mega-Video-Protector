@@ -278,15 +278,20 @@ int main() {
         return fail("The first decoded frame must be a valid 64x64 image.");
     }
 
-    // Seeking must work and produce more frames.
+    // Seeking must work and produce more frames at/after the target — this
+    // guards against a seek silently restarting from the beginning.
     if (!decoder.seek_to(1000)) {
         return fail("Seeking to 1 second must succeed.");
     }
     int post_seek_frames = 0;
+    bool post_seek_at_target = false;
     for (int guard = 0; guard < 30; ++guard) {
         videovault::app::DecodedFrame frame;
         if (!decoder.decode_next_video_frame(&frame)) {
             break;
+        }
+        if (post_seek_frames == 0 && frame.pts_ms < 950) {
+            return fail("The first post-seek frame must be at or near the seek target.");
         }
         ++post_seek_frames;
     }

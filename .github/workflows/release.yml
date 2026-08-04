@@ -1,0 +1,134 @@
+name: Release
+
+# Two ways to create a release:
+#   1. Manual:  Actions -> "Release" -> "Run workflow" -> optional version
+#      (e.g. 0.4.0; empty = auto vYYYY.MM.DD.HHMM). Creates the tag itself.
+#   2. Tag push: git tag v0.4.0 && git push origin v0.4.0  (builds automatically).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to release (e.g. 0.4.0). Empty = auto (vYYYY.MM.DD.HHMM).'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Install Qt 5.12.12 (msvc2017_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.12.12'
+          arch: 'win64_msvc2017_64'
+          cache: true
+
+      - name: Set up MSVC x64 dev environment
+        uses: ilammy/msvc-dev-cmd@v1
+        with:
+          arch: x64
+
+      # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
+      # vcpkg copies may not resolve, so bootstrap a fresh registry clone.
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
+        shell: pwsh
+        run: |
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
+            --triplet x64-windows `
+            --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
+
+      # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
+      # DLL export tables (same step as local builds; paths come from env).
+      - name: Regenerate FFmpeg import libraries
+        shell: bash
+        env:
+          MVP_VCPKG_INSTALLED: ${{ runner.temp }}\vcpkg_installed\x64-windows
+          MVP_FFMPEG_DEFS: ${{ runner.temp }}\ffmpeg-defs
+        run: bash scripts/regenerate-ffmpeg-importlibs.sh
+
+      - name: Configure (Release)
+        shell: pwsh
+        run: |
+          cmake --preset vs2022-x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DVCPKG_INSTALLED_DIR="$env:RUNNER_TEMP\vcpkg_installed" `
+            -DVCPKG_INSTALL_OPTIONS="" `
+            -DCMAKE_SYSTEM_VERSION=""
+
+      - name: Build (Release)
+        shell: pwsh
+        run: |
+          cmake --build out/build/vs2022-x64 --config Release -- /m
+
+      - name: Run tests (Release)
+        shell: pwsh
+        env:
+          PATH: ${{ runner.temp }}\vcpkg_installed\x64-windows\bin;${{ env.QT_ROOT_DIR }}\bin;$(PATH)
+        run: |
+          ctest --test-dir out/build/vs2022-x64 -C Release --output-on-failure
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v$(date +%Y.%m.%d.%H%M)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Package application
+        shell: pwsh
+        run: |
+          $exe = "out/build/vs2022-x64/qt-app/Release/MegaVideoProtect.exe"
+          if (-not (Test-Path $exe)) { throw "Release exe not found: $exe" }
+          $staging = "$env:RUNNER_TEMP\package"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item $exe $staging
+          # Gather Qt runtime deps (Qt5Core/Gui/Widgets/Multimedia/... + platforms/styles/ICU).
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
+          # FFmpeg runtime DLLs from the vcpkg install root.
+          $ffmpegBin = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows\bin"
+          foreach ($dll in @("avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
+            if (-not (Test-Path "$ffmpegBin\$dll")) { throw "Missing FFmpeg DLL: $dll" }
+            Copy-Item "$ffmpegBin\$dll" $staging
+          }
+          Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVideoProtect-windows-x64.zip" -Force
+          Write-Output "Packaged:"
+          Get-ChildItem $staging | Select-Object -ExpandProperty Name
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Mega Video Protect ${{ steps.version.outputs.tag }}
+          body: |
+            Automated Windows x64 build (Release).
+
+            What's inside:
+            - Full vault core: Argon2id, SQLCipher-encrypted database, domain-separated subkeys, authenticated .vvp package format
+            - Explorer-style gallery: Details / Large icons / List, dark theme, thumbnails at import
+            - Tags: multi-tag per video, tag search + filter, tag editor
+            - In-memory player: streaming authenticated reader, read-ahead cache (4-128 MB), volume/mute, fullscreen, keyboard shortcuts
+            - All 7 test suites pass (Smoke, Gallery, Admin, Reader, Media, Playback, Tags)
+
+            Run: extract the zip anywhere and launch MegaVideoProtect.exe.
+          files: ${{ runner.temp }}/MegaVideoProtect-windows-x64.zip

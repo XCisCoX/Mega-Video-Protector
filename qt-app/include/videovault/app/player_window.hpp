@@ -165,6 +165,7 @@ private:
     std::atomic<bool> quit_{false};
     std::atomic<bool> playing_{false};
     std::atomic<bool> ended_{false};
+    std::atomic<bool> seeking_{false};
     std::atomic<bool> openFailed_{false};
     std::atomic<bool> errorShown_{false};
     std::atomic<bool> seekRequested_{false};

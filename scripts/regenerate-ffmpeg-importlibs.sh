@@ -14,11 +14,20 @@
 # units must wrap FFmpeg includes in `extern "C" { ... }` or every reference
 # will be C++-mangled and cannot match the DLLs' undecorated exports.
 set -u
-TOOLS='/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools'
-DUMPBIN="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe"
-LIBEXE="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe"
-INSTALL='C:\Users\cisco\AppData\Local\MegaVideoProtect\vcpkg_installed\x64-windows'
-DEFDIR='C:\Users\cisco\AppData\Local\MegaVideoProtect\ffmpeg-defs'
+# Local defaults; CI overrides via environment (see .github/workflows/release.yml).
+# When the MSVC dev environment is active (msvc-dev-cmd on CI), the
+# VCToolsInstallDir environment variable takes precedence over MVP_MSVC_TOOLS.
+if [ -n "${VCToolsInstallDir:-}" ]; then
+    MSVC_ROOT="${VCToolsInstallDir//\\//}"
+    DUMPBIN="$MSVC_ROOT/bin/Hostx64/x64/dumpbin.exe"
+    LIBEXE="$MSVC_ROOT/bin/Hostx64/x64/lib.exe"
+else
+    TOOLS="${MVP_MSVC_TOOLS:-/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools}"
+    DUMPBIN="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe"
+    LIBEXE="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe"
+fi
+INSTALL="${MVP_VCPKG_INSTALLED:-C:\\Users\\cisco\\AppData\\Local\\MegaVideoProtect\\vcpkg_installed\\x64-windows}"
+DEFDIR="${MVP_FFMPEG_DEFS:-C:\\Users\\cisco\\AppData\\Local\\MegaVideoProtect\\ffmpeg-defs}"
 mkdir -p "$DEFDIR"
 
 regenerate() {
