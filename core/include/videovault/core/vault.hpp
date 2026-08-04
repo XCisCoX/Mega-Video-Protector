@@ -77,6 +77,34 @@ struct VideoInfo {
     std::array<unsigned char, 32> package_sha256{};
     std::string package_relative_path;
     std::uint64_t imported_at{0U};
+    // Phase 7: tag names attached to this video (case-insensitively sorted).
+    std::vector<std::string> tags;
+};
+
+// Phase 7: a tag with the number of videos it is attached to.
+struct TagInfo {
+    std::int64_t id{0};
+    std::string name;
+    std::int64_t video_count{0};
+};
+
+// Phase 5: container metadata probed through FFmpeg.
+struct MediaInfo {
+    std::int64_t video_id{0};
+    std::uint64_t duration_ms{0U};
+    std::uint32_t width{0U};
+    std::uint32_t height{0U};
+    std::uint32_t rotation_degrees{0U};
+    std::string codec_name;
+};
+
+// A decrypted JPEG thumbnail ready for display.
+struct ThumbnailInfo {
+    std::int64_t video_id{0};
+    std::uint32_t width{0U};
+    std::uint32_t height{0U};
+    std::string mime;
+    std::vector<unsigned char> bytes;
 };
 
 class Vault final {
@@ -149,6 +177,39 @@ public:
         std::string_view current_password,
         std::string_view new_password,
         Argon2Parameters parameters = {});
+
+    // Returns the stored thumbnail, decrypting it for display.
+    [[nodiscard]] Result<ThumbnailInfo> thumbnail(
+        std::int64_t video_id) const;
+
+    // Phase 5: media metadata and encrypted thumbnails.
+    // Probes an imported video's container through FFmpeg (streaming over the
+    // encrypted package; nothing is written to disk).
+    [[nodiscard]] Result<MediaInfo> media_info(std::int64_t video_id) const;
+
+    // Decodes a representative frame, scales it to fit `max_dimension`, and
+    // stores the JPEG encrypted in the vault database. Returns the plaintext
+    // thumbnail for display.
+    [[nodiscard]] Result<ThumbnailInfo> generate_thumbnail(
+        std::int64_t video_id,
+        std::uint32_t max_dimension = 320U) const;
+
+    // Phase 7: tags. Tag names are trimmed, non-empty, at most 64 bytes, and
+    // matched case-insensitively (re-adding "family" to "Family" is a no-op
+    // that returns the same tag id). Attaching a tag creates it on demand.
+    [[nodiscard]] Result<std::int64_t> add_tag(
+        std::int64_t video_id,
+        std::string_view tag_name);
+
+    [[nodiscard]] Result<bool> remove_tag(
+        std::int64_t video_id,
+        std::int64_t tag_id);
+
+    [[nodiscard]] Result<std::vector<TagInfo>> tags_for_video(
+        std::int64_t video_id) const;
+
+    // All tags with their video counts, sorted case-insensitively.
+    [[nodiscard]] Result<std::vector<TagInfo>> list_tags() const;
 
 private:
     class Impl;

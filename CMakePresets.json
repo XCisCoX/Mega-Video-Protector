@@ -18,7 +18,7 @@
         "CMAKE_SYSTEM_VERSION": "10.0.22621.0",
         "VCPKG_MANIFEST_INSTALL": "OFF",
         "VCPKG_TARGET_TRIPLET": "x64-windows",
-        "VCPKG_INSTALLED_DIR": "${sourceDir}/out/vcpkg_installed",
+        "VCPKG_INSTALLED_DIR": "C:/Users/cisco/AppData/Local/MegaVideoProtect/vcpkg_installed",
         "VCPKG_OVERLAY_PORTS": "${sourceDir}/third_party/vcpkg-overlays",
         "VCPKG_INSTALL_OPTIONS": "--x-buildtrees-root=C:/Users/cisco/AppData/Local/MegaVideoProtect/vcpkg-buildtrees;--x-packages-root=C:/Users/cisco/AppData/Local/MegaVideoProtect/vcpkg-packages",
         "MVP_BUILD_APP": "ON",

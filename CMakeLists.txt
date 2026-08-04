@@ -26,6 +26,11 @@ if(WIN32 AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
     message(FATAL_ERROR "Mega Video Protect supports only x64 Windows builds.")
 endif()
 
+if(NOT DEFINED VCPKG_INSTALLED_DIR OR NOT DEFINED VCPKG_TARGET_TRIPLET)
+    message(FATAL_ERROR "Phase 2 requires the pinned vcpkg manifest and x64 triplet.")
+endif()
+set(MVP_VCPKG_PREFIX "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+
 add_subdirectory(core)
 
 if(MVP_BUILD_APP)

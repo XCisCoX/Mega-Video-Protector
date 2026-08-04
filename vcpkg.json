@@ -14,6 +14,7 @@
         "avcodec",
         "avformat",
         "swscale",
+        "swresample",
         "ffmpeg"
       ]
     }

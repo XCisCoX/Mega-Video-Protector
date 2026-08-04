@@ -169,10 +169,16 @@ int main() {
         if (!file) {
             return fail("The tamper test could not modify the package file.");
         }
-        const auto corrupted = created.value().read_video_range(video_id, 65536U * 2U, 100U);
+        // The tampered byte lives in chunk 1: a range starting at chunk 1.
+        const auto corrupted = created.value().read_video_range(video_id, 65536U, 100U);
         if (corrupted
             || corrupted.error().code != VaultErrorCode::PackageModified) {
             return fail("Reading a tampered chunk must return PackageModified.");
+        }
+        // Untouched chunks elsewhere in the same package stay readable.
+        const auto intact = created.value().read_video_range(video_id, 0U, 100U);
+        if (!intact || !rangeMatches(intact.value(), source, 0U)) {
+            return fail("Untouched chunks must remain readable after a tamper.");
         }
     }
 

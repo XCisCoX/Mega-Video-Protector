@@ -308,6 +308,130 @@ Result<bool> migrate_to_version_2(sqlite3* database) {
     return true;
 }
 
+Result<bool> migrate_to_version_3(sqlite3* database) {
+    auto transaction = run(database, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read current schema version", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    const int version = sqlite3_column_int(current.get(), 0);
+    if (version >= 3) {
+        auto committed = run(database, "COMMIT;");
+        if (!committed) {
+            rollback();
+            return committed.error();
+        }
+        return true;
+    }
+
+    auto created = run(database,
+        "CREATE TABLE thumbnails ("
+        "video_id INTEGER PRIMARY KEY NOT NULL REFERENCES videos(id) ON DELETE CASCADE,"
+        "mime TEXT NOT NULL,"
+        "width INTEGER NOT NULL,"
+        "height INTEGER NOT NULL,"
+        "nonce BLOB NOT NULL,"
+        "ciphertext BLOB NOT NULL,"
+        "created_at INTEGER NOT NULL);");
+    if (!created) {
+        rollback();
+        return created.error();
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database,
+        "INSERT INTO schema_migrations(version, applied_at) VALUES(3, ?1);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseFailure,
+            "insert schema migration 3", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
+Result<bool> migrate_to_version_4(sqlite3* database) {
+    auto transaction = run(database, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read current schema version", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    const int version = sqlite3_column_int(current.get(), 0);
+    if (version >= 4) {
+        auto committed = run(database, "COMMIT;");
+        if (!committed) {
+            rollback();
+            return committed.error();
+        }
+        return true;
+    }
+
+    auto created_tags = run(database,
+        "CREATE TABLE tags ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "name TEXT NOT NULL UNIQUE COLLATE NOCASE,"
+        "created_at INTEGER NOT NULL);");
+    if (!created_tags) {
+        rollback();
+        return created_tags.error();
+    }
+    auto created_video_tags = run(database,
+        "CREATE TABLE video_tags ("
+        "video_id INTEGER NOT NULL REFERENCES videos(id) ON DELETE CASCADE,"
+        "tag_id INTEGER NOT NULL REFERENCES tags(id) ON DELETE CASCADE,"
+        "created_at INTEGER NOT NULL,"
+        "PRIMARY KEY (video_id, tag_id));");
+    if (!created_video_tags) {
+        rollback();
+        return created_video_tags.error();
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database,
+        "INSERT INTO schema_migrations(version, applied_at) VALUES(4, ?1);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseFailure,
+            "insert schema migration 4", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
 VideoRow row_from_statement(sqlite3_stmt* statement) {
     VideoRow row;
     row.id = sqlite3_column_int64(statement, 0);
@@ -380,9 +504,17 @@ Result<Database> Database::create(
     if (!schema) {
         return schema.error();
     }
-    auto migrated = migrate_to_version_2(database.value().database_);
-    if (!migrated) {
-        return migrated.error();
+    auto migrated_v2 = migrate_to_version_2(database.value().database_);
+    if (!migrated_v2) {
+        return migrated_v2.error();
+    }
+    auto migrated_v3 = migrate_to_version_3(database.value().database_);
+    if (!migrated_v3) {
+        return migrated_v3.error();
+    }
+    auto migrated_v4 = migrate_to_version_4(database.value().database_);
+    if (!migrated_v4) {
+        return migrated_v4.error();
     }
     return std::move(database.value());
 }
@@ -400,9 +532,17 @@ Result<Database> Database::open(
         return database_error(database.value().database_, VaultErrorCode::DatabaseCorrupt,
             "validate encrypted database", sqlite3_extended_errcode(database.value().database_));
     }
-    auto migrated = migrate_to_version_2(database.value().database_);
-    if (!migrated) {
-        return migrated.error();
+    auto migrated_v2 = migrate_to_version_2(database.value().database_);
+    if (!migrated_v2) {
+        return migrated_v2.error();
+    }
+    auto migrated_v3 = migrate_to_version_3(database.value().database_);
+    if (!migrated_v3) {
+        return migrated_v3.error();
+    }
+    auto migrated_v4 = migrate_to_version_4(database.value().database_);
+    if (!migrated_v4) {
+        return migrated_v4.error();
     }
     return std::move(database.value());
 }
@@ -537,6 +677,16 @@ Result<std::vector<VideoRow>> Database::list_videos() const {
     if (status != SQLITE_DONE) {
         return database_error(database_, VaultErrorCode::DatabaseFailure,
             "execute video listing", sqlite3_extended_errcode(database_));
+    }
+    for (auto& row : rows) {
+        auto tags = tags_for_video(row.id);
+        if (!tags) {
+            return tags.error();
+        }
+        row.tag_names.reserve(tags.value().size());
+        for (const auto& tag : tags.value()) {
+            row.tag_names.push_back(tag.name);
+        }
     }
     return rows;
 }
@@ -707,6 +857,245 @@ Result<bool> Database::rekey(const SensitiveBuffer& new_database_key) {
             "rekey SQLCipher database", sqlite3_extended_errcode(database_));
     }
     return true;
+}
+
+Result<bool> Database::insert_thumbnail(
+    const std::int64_t video_id,
+    const ThumbnailRow& row) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement insert(database_,
+        "INSERT OR REPLACE INTO thumbnails("
+        "video_id, mime, width, height, nonce, ciphertext, created_at)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, video_id) != SQLITE_OK
+        || sqlite3_bind_text(insert.get(), 2, row.mime.c_str(),
+               static_cast<int>(row.mime.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int(insert.get(), 3, static_cast<int>(row.width)) != SQLITE_OK
+        || sqlite3_bind_int(insert.get(), 4, static_cast<int>(row.height)) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare thumbnail insert", sqlite3_extended_errcode(database_));
+    }
+    const auto bound_nonce = bind_blob(insert, 5, row.nonce);
+    const auto bound_ciphertext = bind_blob(insert, 6, row.ciphertext);
+    if (!bound_nonce || !bound_ciphertext
+        || sqlite3_bind_int64(insert.get(), 7,
+               static_cast<sqlite3_int64>(row.created_at)) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute thumbnail insert", sqlite3_extended_errcode(database_));
+    }
+    return true;
+}
+
+Result<ThumbnailRow> Database::query_thumbnail(const std::int64_t video_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT mime, width, height, nonce, ciphertext, created_at"
+        " FROM thumbnails WHERE video_id = ?1;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1, video_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare thumbnail query", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_step(query.get()) != SQLITE_ROW) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "no thumbnail exists for the given video"};
+    }
+    ThumbnailRow row;
+    if (const auto* mime = reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 0));
+        mime != nullptr) {
+        row.mime.assign(mime, static_cast<std::size_t>(sqlite3_column_bytes(query.get(), 0)));
+    }
+    row.width = static_cast<std::uint32_t>(sqlite3_column_int(query.get(), 1));
+    row.height = static_cast<std::uint32_t>(sqlite3_column_int(query.get(), 2));
+    const auto nonce = column_blob(query.get(), 3);
+    if (nonce.size() == row.nonce.size()) {
+        std::copy(nonce.begin(), nonce.end(), row.nonce.begin());
+    }
+    row.ciphertext = column_blob(query.get(), 4);
+    row.created_at = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 5));
+    return row;
+}
+
+Result<std::vector<std::pair<std::int64_t, ThumbnailRow>>>
+Database::list_thumbnails() const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT video_id, mime, width, height, nonce, ciphertext, created_at"
+        " FROM thumbnails ORDER BY video_id;");
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare thumbnail listing", sqlite3_extended_errcode(database_));
+    }
+    std::vector<std::pair<std::int64_t, ThumbnailRow>> result;
+    while (true) {
+        const int step = sqlite3_step(query.get());
+        if (step == SQLITE_DONE) {
+            break;
+        }
+        if (step != SQLITE_ROW) {
+            return database_error(database_, VaultErrorCode::DatabaseFailure,
+                "read thumbnail listing", sqlite3_extended_errcode(database_));
+        }
+        std::pair<std::int64_t, ThumbnailRow> entry;
+        entry.first = sqlite3_column_int64(query.get(), 0);
+        ThumbnailRow& row = entry.second;
+        if (const auto* mime = reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1));
+            mime != nullptr) {
+            row.mime.assign(mime, static_cast<std::size_t>(sqlite3_column_bytes(query.get(), 1)));
+        }
+        row.width = static_cast<std::uint32_t>(sqlite3_column_int(query.get(), 2));
+        row.height = static_cast<std::uint32_t>(sqlite3_column_int(query.get(), 3));
+        const auto nonce = column_blob(query.get(), 4);
+        if (nonce.size() == row.nonce.size()) {
+            std::copy(nonce.begin(), nonce.end(), row.nonce.begin());
+        }
+        row.ciphertext = column_blob(query.get(), 5);
+        row.created_at = static_cast<std::uint64_t>(sqlite3_column_int64(query.get(), 6));
+        result.push_back(std::move(entry));
+    }
+    return result;
+}
+
+Result<std::int64_t> Database::ensure_tag(const std::string& name) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database_,
+        "INSERT OR IGNORE INTO tags(name, created_at) VALUES(?1, ?2);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_text(insert.get(), 1, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 2, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "insert tag", sqlite3_extended_errcode(database_));
+    }
+    Statement query(database_,
+        "SELECT id FROM tags WHERE name = ?1 COLLATE NOCASE;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_text(query.get(), 1, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "resolve tag id", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_step(query.get()) != SQLITE_ROW) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "tag was not created"};
+    }
+    return sqlite3_column_int64(query.get(), 0);
+}
+
+Result<bool> Database::tag_video(
+    const std::int64_t video_id,
+    const std::int64_t tag_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database_,
+        "INSERT OR IGNORE INTO video_tags(video_id, tag_id, created_at)"
+        " VALUES(?1, ?2, ?3);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, video_id) != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 2, tag_id) != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 3, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "associate tag with video", sqlite3_extended_errcode(database_));
+    }
+    return true;
+}
+
+Result<bool> Database::untag_video(
+    const std::int64_t video_id,
+    const std::int64_t tag_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement remove(database_,
+        "DELETE FROM video_tags WHERE video_id = ?1 AND tag_id = ?2;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, video_id) != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 2, tag_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "remove video tag association", sqlite3_extended_errcode(database_));
+    }
+    return true;
+}
+
+Result<std::vector<TagRow>> Database::tags_for_video(
+    const std::int64_t video_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT t.id, t.name, 0 FROM tags t"
+        " JOIN video_tags vt ON vt.tag_id = t.id"
+        " WHERE vt.video_id = ?1"
+        " ORDER BY t.name COLLATE NOCASE;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1, video_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare video tag listing", sqlite3_extended_errcode(database_));
+    }
+    std::vector<TagRow> tags;
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+        TagRow tag;
+        tag.id = sqlite3_column_int64(query.get(), 0);
+        if (const auto* name = reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1));
+            name != nullptr) {
+            tag.name.assign(name, static_cast<std::size_t>(sqlite3_column_bytes(query.get(), 1)));
+        }
+        tags.push_back(std::move(tag));
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute video tag listing", sqlite3_extended_errcode(database_));
+    }
+    return tags;
+}
+
+Result<std::vector<TagRow>> Database::list_tags() const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT t.id, t.name, count(vt.video_id)"
+        " FROM tags t LEFT JOIN video_tags vt ON vt.tag_id = t.id"
+        " GROUP BY t.id ORDER BY t.name COLLATE NOCASE;");
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare tag listing", sqlite3_extended_errcode(database_));
+    }
+    std::vector<TagRow> tags;
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+        TagRow tag;
+        tag.id = sqlite3_column_int64(query.get(), 0);
+        if (const auto* name = reinterpret_cast<const char*>(sqlite3_column_text(query.get(), 1));
+            name != nullptr) {
+            tag.name.assign(name, static_cast<std::size_t>(sqlite3_column_bytes(query.get(), 1)));
+        }
+        tag.video_count = sqlite3_column_int64(query.get(), 2);
+        tags.push_back(std::move(tag));
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute tag listing", sqlite3_extended_errcode(database_));
+    }
+    return tags;
 }
 
 } // namespace videovault::core::internal

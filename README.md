@@ -1,6 +1,6 @@
 # Mega Video Protect
 
-Production-oriented Windows video-vault project. Phase 1 (architecture and verified build foundation), Phase 2 (secure vault core + setup/login UI shell), Phase 3 (encrypted import + gallery), and Phase 4 (vault administration: removal and password change) are complete.
+Production-oriented Windows video-vault project. Phase 1 (architecture and verified build foundation), Phase 2 (secure vault core + setup/login UI shell), Phase 3 (encrypted import + gallery), Phase 4 (vault administration: removal and password change), Phase 5 (streaming authenticated reader, FFmpeg media probing, and encrypted thumbnails), Phase 6 (auto-thumbnails on import, thumbnail re-keying on password change, Explorer-style gallery views, and in-memory video playback), and Phase 7 (multi-tag organization with tag filtering, and a full Windows Explorer-style unlocked view) are complete.
 
 ## Verified local toolchain
 
@@ -10,7 +10,7 @@ Production-oriented Windows video-vault project. Phase 1 (architecture and verif
 - Qt framework 5.12.12 at `C:/Qt/Qt5.12.12/5.12.12/msvc2017_64`
 - Qt kit: desktop MSVC 2017 x64; used with the newer VS 2022 linker/toolset under Microsoft's supported v14x binary-compatibility model
 - Qt Core, Concurrent, Widgets, Multimedia, and MultimediaWidgets are used. Qt SQL is intentionally not used: the core owns SQLCipher through its C API.
-- vcpkg (bundled with VS 2022 Build Tools) provides `argon2`, `libsodium`, and `sqlcipher` as pinned x64 MSVC builds (see `vcpkg.json` baseline).
+- vcpkg (bundled with VS 2022 Build Tools) provides `argon2`, `libsodium`, `sqlcipher`, and `ffmpeg` as pinned x64 MSVC builds (see `vcpkg.json` baseline). FFmpeg 7.1.1 is installed lean: `avcodec`, `avformat`, `swscale`, and the `ffmpeg` CLI feature (used to validate test fixtures); `avutil` is implicit in the core.
 
 Qt Creator 5.0.2 is the IDE version, not the framework version. MinGW kits are intentionally not selected.
 
@@ -23,8 +23,9 @@ Phase 2 pins the production cryptographic/database dependencies through the vcpk
 - `sqlcipher` — encrypted vault database, linked through its C API
 - A vcpkg overlay port for `tcl` (`third_party/vcpkg-overlays/tcl`) carries the MSVC 14.44 build fixes SQLCipher's Windows build needs (implicit rules, shell install, generic Windows fixes)
 - Strawberry Perl 5.42.0.1 portable x64 is required by the OpenSSL build that SQLCipher links; the file was verified by SHA-512 before use
+- `ffmpeg` (Phase 5): two Windows quirks are handled by `scripts/regenerate-ffmpeg-importlibs.sh` — the vcpkg port installs stub `.lib` import libraries (no symbol entries; MSVC link fails with LNK2019 on every `av*` symbol), so real import libs are regenerated from the DLL export tables with `dumpbin` + `lib.exe`; and FFmpeg 7.x public headers carry no `extern "C"` guards, so every FFmpeg include in C++ translation units is wrapped in `extern "C" { ... }`. Re-run the script after any vcpkg reinstall of ffmpeg.
 
-vcpkg build trees and packages are redirected outside the project (`C:/Users/cisco/AppData/Local/MegaVideoProtect/...`) because the source path contains a space. `VCPKG_MANIFEST_INSTALL` is OFF in the preset; dependencies are installed once into `out/vcpkg_installed` (git-ignored).
+vcpkg build trees, packages, AND the install root are redirected outside the project (`C:/Users/cisco/AppData/Local/MegaVideoProtect/...`) because the source path contains a space — FFmpeg's MSVC response files break on the space in "Mega King" (LNK1181 on `-libpath`). `VCPKG_MANIFEST_INSTALL` is OFF in the preset; `VCPKG_INSTALLED_DIR` points at the AppData install root (git-ignored).
 
 ## Build
 
@@ -71,6 +72,37 @@ The generated Visual Studio solution is under `out/build/vs2022-x64` and support
 - `Vault::change_password` verifies the caller knows the current password by re-deriving the master key from the on-disk metadata and comparing it in constant time with the live master key (`WrongPassword` on mismatch, with no state change). It then derives a fresh key hierarchy from the new password (new random salt, optional new Argon2id parameters), re-wraps every file key under the new wrapping subkey, writes the new external metadata with a freshly sealed password verifier, updates the database metadata record and all wrapped keys, and re-encrypts the whole SQLCipher file with `sqlite3_rekey`. On success the open session continues under the new credentials; the old password is rejected (`WrongPassword`) and the new one opens the vault with the gallery and every video intact. Chained changes work.
 - Administration calls on a locked vault fail cleanly with `InvalidArgument`.
 
+## Phase 5 verified behavior
+
+`VideoVaultCore.Reader` verifies the streaming authenticated reader, and `VideoVaultCore.Media` verifies the FFmpeg media pipeline:
+
+- `PackageReader` (internal) opens a package with the unwrapped file key, verifies the header, and serves authenticated plaintext on demand: `seek` to any offset and `read` across chunk boundaries, with a bounded LRU cache of decrypted chunks (4 x 64 KiB). Every touched chunk's AEAD tag is verified before its bytes are exposed (`PackageModified` on tamper, and untouched chunks in the same package stay readable). This is the foundation for probe/thumbnail/playback without ever decrypting a whole video to disk or to a plaintext temp file.
+- `Vault::read_video_range(video_id, offset, size)` exposes the reader publicly (fewer bytes at EOF, empty at/past end); `read_video_bytes` now delegates to it. Cross-chunk ranges, chunk-boundary slices, the final partial chunk, EOF behavior, tamper detection, missing packages, unknown ids, and locked-vault failures are all covered.
+- `Vault::media_info(video_id)` probes container metadata through FFmpeg streaming over the encrypted package via a custom AVIO context layered on `PackageReader` (no plaintext touches disk): duration (ms), width/height, rotation from the display matrix side data, and the codec name. Non-media content returns `UnsupportedVideoFormat`.
+- `Vault::generate_thumbnail(video_id, max_dimension)` seeks to ~10% of the stream (capped at 10 s), decodes a representative frame, scales it to fit `max_dimension` (aspect-preserving, no upscaling), and encodes a JPEG (yuv420p, full-range). The JPEG is encrypted under the domain-separated thumbnail subkey (id 4, context `MVPTMB01`) with `video_id || package_id` as associated data and stored in the new `thumbnails` table (schema version 3, `ON DELETE CASCADE` from `videos`).
+- `Vault::thumbnail(video_id)` returns the stored thumbnail decrypted for display; thumbnails persist across lock/reopen and cascade away with `remove_video`.
+- The media test builds its own fixture at runtime with the FFmpeg libraries (MJPEG codec in a Matroska container, 64x64, 10 fps, 20 frames — the AVI/MKV muxers reject rawvideo, so the fixture uses a real codec with proper duration signaling).
+- The Qt shell gained a "Generate thumbnail" button and asynchronously attaches stored thumbnails as 96 px icons to gallery rows (build-verified; UI behavior is user-tested).
+
+## Phase 6 verified behavior
+
+`VideoVault.Playback` verifies the in-memory player engine; the gallery and thumbnail behaviors are build-verified and user-tested:
+
+- **Thumbnails at import time.** `Vault::import_file` now generates and stores a thumbnail immediately after the database commit (best effort — non-video imports and undecodable formats fail quietly and never fail the import). The gallery therefore shows media pictures without any manual step; the "Regenerate thumbnail" button remains for replacing a bad frame.
+- **Thumbnails survive password changes.** A Phase 5 gap is closed: thumbnails are encrypted under a subkey derived from the master key, so `change_password` now re-encrypts every stored thumbnail under the new thumbnail subkey (best effort per row; a damaged thumbnail is dropped rather than failing the change). The media test asserts byte-for-byte thumbnail equality across a password change and reopen.
+- **Explorer-style gallery.** The unlocked page has a view switcher with three modes like Windows Explorer: "Details" (columns: Name, Size, Duration, Resolution, Codec, Imported — metadata filled asynchronously per video), "Large icons" (128 px thumbnails on a grid), and "List" (small icons). Thumbnails attach to both views; double-clicking any entry opens the player.
+- **In-memory playback.** `MediaDecoder` (in `qt-app`) streams the plaintext of an encrypted video through `Vault::read_video_range` (bounded, per-chunk authenticated) via a custom FFmpeg AVIO context — the same technique the Phase 5 probe path proved — and decodes video + audio entirely in memory: nothing is written to disk and no whole-file plaintext buffer exists. `PlayerWindow` shows frames on a timer paced by the audio clock (wall clock when silent), with play/pause, a seek slider, and a position label; decoded audio (resampled to s16le via swresample) feeds a `QAudioOutput` through a pull-mode `AudioSink` QIODevice. The playback test imports a fixture with MJPEG video + PCM audio and verifies duration, resolution, ≥10 decoded frames, a valid first frame, post-seek decoding, and non-empty audio samples — all headless.
+- FFmpeg now also builds the `swresample` feature; `scripts/regenerate-ffmpeg-importlibs.sh` covers the fifth import library.
+
+## Phase 7 verified behavior
+
+`VideoVaultCore.Tags` verifies the tagging core; the explorer UI is build-verified and user-tested:
+
+- **Tags.** Schema version 4 adds `tags` (case-insensitively unique names) and `video_tags` (many-to-many, both FKs `ON DELETE CASCADE`). `Vault::add_tag(video_id, name)` trims the name, rejects empty / over-64-byte / control-character names (`InvalidArgument`), creates the tag on demand, and attaches it idempotently — re-adding "family" to "Family" returns the same tag id. `remove_tag`, `tags_for_video`, and `list_tags` (with per-tag video counts) round out the API; `VideoInfo` now carries each video's tag names, so gallery listing and client-side filtering need no extra queries per video.
+- **Tag hygiene.** Removing a video cascades its tag associations (the tag itself survives with a zero count); tags persist across lock/reopen; a locked vault rejects all tag operations with `InvalidArgument`.
+- **Explorer-style unlocked view.** The unlocked page is now a full-bleed file-explorer layout: a slim command bar (view mode + tag filter on the left, Import video…, Change password…, and a small flat Lock button on the right), the gallery filling the whole window, and a status bar (vault path, "N videos · X MB", inline messages). The old centered card, headings, and big buttons are gone. The view mode is remembered in `QSettings`.
+- **Tag filtering and editing.** The tag filter dropdown lists every tag with its count ("Family (2)") plus "All videos"; selecting one filters both gallery views to matching videos (status bar shows the filtered count). Right-clicking any entry opens an Explorer-style context menu: Play, Edit tags…, Regenerate thumbnail, Remove. The tag editor dialog shows all tags as checkboxes (checked = applied) with a "new tag" input; changes are applied on a worker thread and both the filter and gallery refresh automatically. Tags also appear as a column in Details view.
+
 ## Current targets
 
 - `VideoVaultCore`: Qt-independent C++20 static library
@@ -78,11 +110,19 @@ The generated Visual Studio solution is under `out/build/vs2022-x64` and support
 - `VideoVaultCoreTests`: smoke test for create/open/lock, wrong password, password validation, and verifier tamper detection
 - `VideoVaultCoreGalleryTests`: import, gallery listing, package layout, decrypt round-trip (multi-chunk and empty), persistence across reopen, tamper (`PackageModified`), and missing-package (`PackageMissing`) tests
 - `VideoVaultCoreAdminTests`: video removal (row, package file, survivor integrity, idempotency) and password change (old/new credential behavior, gallery survival, chained changes, wrong-current rejection, locked-vault failures)
+- `VideoVaultCoreReaderTests`: streaming range reads (cross-chunk, boundaries, EOF), tamper (`PackageModified`) with untouched-chunk survival, missing package, unknown id, locked vault
+- `VideoVaultCoreMediaTests`: in-test MJPEG fixture generation, `media_info` (resolution, codec, duration), thumbnail generation at native and scaled sizes, encrypted thumbnail storage/persistence/cascade, non-media rejection (`UnsupportedVideoFormat`), unknown id and locked-vault failures
+- `VideoVaultPlaybackTests` (in `qt-app`): headless in-memory playback — duration, resolution, ≥10 decoded frames, valid first frame, seeking, and non-empty audio samples from an encrypted import
+- `VideoVaultCoreTagTests`: tag creation/deduplication (case-insensitive), trimming, invalid-name rejection, shared tags across videos, per-video and global listings with counts, untagging, cascade on removal, persistence across reopen, locked-vault failures
 
 ## Limitations
 
-- Thumbnails, media probing, and playback are not implemented (later phases; FFmpeg is pinned in Phase 5).
-- `read_video_bytes` decrypts the whole package into memory; it is intended for verification/export of reasonably sized files. Playback will use a bounded streaming reader.
+- Playback is in-memory (never a whole-file plaintext temp file) but the player is a first cut: A/V sync is basic (frames paced against the audio clock; video-only files use the wall clock), there is no audio volume control, no subtitle support, and codecs outside the lean FFmpeg build (e.g., hardware-accelerated H.264/HEVC) fall back to software decode when an internal decoder exists. Qt's WMF multimedia backend was deliberately not used for the vault device.
+- Audio requires the `swresample` FFmpeg feature (now in the manifest); re-run `scripts/regenerate-ffmpeg-importlibs.sh` after any ffmpeg reinstall (it now covers swresample too).
+- `read_video_bytes` decrypts a whole package into memory; it is intended for verification/export of reasonably sized files. `read_video_range` and `PackageReader` are the bounded paths.
+- Thumbnails are generated at import time (best effort for media content) and can be regenerated per video.
+- The media test fixture uses MJPEG-in-Matroska; real-world container/codec variety (H.264/MP4, rotation metadata, audio-only streams) is exercised only as far as the FFmpeg build's internal codecs allow. The lean FFmpeg build has no external codec libraries (no H.264/HEVC encoders; decoders that ship inside FFmpeg remain available).
+- FFmpeg Windows quirks: regenerated import libraries and `extern "C"` include wrapping are required (see Dependencies); `scripts/regenerate-ffmpeg-importlibs.sh` must be re-run after any vcpkg reinstall of ffmpeg.
 - Import has no cancellation or progress callback yet; the UI shows a busy state.
 - A crash in the middle of a password change can leave the vault in a state where neither the old nor the new password cleanly unlocks it (data is intact; recovery tooling and crash-injection tests are outstanding). The happy path is fully verified.
 - Argon2id is invoked through the `argon2` port directly rather than libsodium's `crypto_pwhash` wrapper; both were considered, the direct port was pinned. See `docs/architecture.md`.

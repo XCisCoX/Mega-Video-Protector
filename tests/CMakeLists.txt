@@ -65,3 +65,41 @@ add_custom_command(TARGET VideoVaultCoreReaderTests POST_BUILD
 )
 
 add_test(NAME VideoVaultCore.Reader COMMAND VideoVaultCoreReaderTests)
+
+add_executable(VideoVaultCoreMediaTests
+    media.cpp
+)
+
+target_link_libraries(VideoVaultCoreMediaTests PRIVATE VideoVault::Core)
+target_include_directories(VideoVaultCoreMediaTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+target_link_libraries(VideoVaultCoreMediaTests PRIVATE
+    "${MVP_VCPKG_PREFIX}/lib/avformat.lib"
+    "${MVP_VCPKG_PREFIX}/lib/avcodec.lib"
+    "${MVP_VCPKG_PREFIX}/lib/avutil.lib"
+    "${MVP_VCPKG_PREFIX}/lib/swscale.lib"
+)
+target_compile_features(VideoVaultCoreMediaTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultCoreMediaTests PROPERTIES FOLDER "Tests")
+
+add_custom_command(TARGET VideoVaultCoreMediaTests POST_BUILD
+    COMMAND ${CMAKE_COMMAND} -E copy_if_different
+        $<TARGET_RUNTIME_DLLS:VideoVaultCoreMediaTests>
+        $<TARGET_FILE_DIR:VideoVaultCoreMediaTests>
+    COMMAND_EXPAND_LISTS
+)
+
+add_test(NAME VideoVaultCore.Media COMMAND VideoVaultCoreMediaTests)
+
+# The playback test target is defined in qt-app/ (it needs Qt + FFmpeg), but
+# ctest registration must happen after enable_testing() at the top level.
+add_test(NAME VideoVault.Playback COMMAND $<TARGET_FILE:VideoVaultPlaybackTests>)
+
+add_executable(VideoVaultCoreTagTests
+    tags.cpp
+)
+
+target_link_libraries(VideoVaultCoreTagTests PRIVATE VideoVault::Core)
+target_compile_features(VideoVaultCoreTagTests PRIVATE cxx_std_20)
+set_target_properties(VideoVaultCoreTagTests PROPERTIES FOLDER "Tests")
+
+add_test(NAME VideoVaultCore.Tags COMMAND VideoVaultCoreTagTests)

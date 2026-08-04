@@ -7,6 +7,7 @@
 #include <filesystem>
 #include <fstream>
 #include <istream>
+#include <limits>
 #include <span>
 #include <vector>
 
@@ -104,7 +105,8 @@ private:
     static constexpr std::size_t kMaxCachedChunks = 4U;
 
     struct CachedChunk {
-        std::uint32_t index{0U};
+        // An impossible index so empty default slots never satisfy a hit.
+        std::uint32_t index{std::numeric_limits<std::uint32_t>::max()};
         std::vector<unsigned char> plaintext;
     };
 

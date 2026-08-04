@@ -1,11 +1,6 @@
 find_package(unofficial-argon2 CONFIG REQUIRED)
 find_package(sqlcipher CONFIG REQUIRED)
 
-if(NOT DEFINED VCPKG_INSTALLED_DIR OR NOT DEFINED VCPKG_TARGET_TRIPLET)
-    message(FATAL_ERROR "Phase 2 requires the pinned vcpkg manifest and x64 triplet.")
-endif()
-
-set(MVP_VCPKG_PREFIX "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
 add_library(MvpSodium SHARED IMPORTED GLOBAL)
 set_target_properties(MvpSodium PROPERTIES
     IMPORTED_CONFIGURATIONS "Debug;Release"
@@ -21,6 +16,7 @@ set_target_properties(MvpSodium PROPERTIES
 add_library(VideoVaultCore STATIC
     src/crypto.cpp
     src/database.cpp
+    src/media.cpp
     src/metadata.cpp
     src/package.cpp
     src/vault.cpp
@@ -42,6 +38,10 @@ target_link_libraries(VideoVaultCore
         MvpSodium
         unofficial::argon2::libargon2
         sqlcipher::sqlcipher
+        "${MVP_VCPKG_PREFIX}/lib/avformat.lib"
+        "${MVP_VCPKG_PREFIX}/lib/avcodec.lib"
+        "${MVP_VCPKG_PREFIX}/lib/avutil.lib"
+        "${MVP_VCPKG_PREFIX}/lib/swscale.lib"
 )
 
 target_compile_features(VideoVaultCore PUBLIC cxx_std_20)

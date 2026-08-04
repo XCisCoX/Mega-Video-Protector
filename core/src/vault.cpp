@@ -2,6 +2,7 @@
 
 #include "internal/crypto.hpp"
 #include "internal/database.hpp"
+#include "internal/media.hpp"
 #include "internal/metadata.hpp"
 #include "internal/package.hpp"
 
@@ -22,9 +23,12 @@ namespace {
 constexpr std::array<char, 8> kDatabaseContext{'M', 'V', 'P', 'D', 'B', '0', '0', '1'};
 constexpr std::array<char, 8> kVerifierContext{'M', 'V', 'P', 'V', 'E', 'R', '0', '1'};
 constexpr std::array<char, 8> kPackageWrappingContext{'M', 'V', 'P', 'R', 'A', 'P', '0', '1'};
+constexpr std::array<char, 8> kThumbnailContext{'M', 'V', 'P', 'T', 'M', 'B', '0', '1'};
 constexpr std::uint64_t kDatabaseSubkeyId = 1U;
 constexpr std::uint64_t kVerifierSubkeyId = 2U;
 constexpr std::uint64_t kPackageWrappingSubkeyId = 3U;
+constexpr std::uint64_t kThumbnailSubkeyId = 4U;
+constexpr std::uint32_t kImportThumbnailDimension = 320U;
 
 std::string to_hex_lower(const std::span<const unsigned char> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
@@ -37,8 +41,142 @@ std::string to_hex_lower(const std::span<const unsigned char> bytes) {
     return encoded;
 }
 
+void write_u64_le(std::span<unsigned char> destination, const std::uint64_t value) {
+    for (std::size_t i = 0U; i < 8U; ++i) {
+        destination[i] = static_cast<unsigned char>((value >> (8U * i)) & 0xffU);
+    }
+}
+
+// Trims whitespace, rejects empty/over-long/control-char names, and returns
+// the normalized tag name. The empty string signals an invalid name.
+std::string normalize_tag_name(const std::string_view raw) {
+    std::size_t begin = 0;
+    std::size_t end = raw.size();
+    while (begin < end && (raw[begin] == ' ' || raw[begin] == '\t')) {
+        ++begin;
+    }
+    while (end > begin && (raw[end - 1] == ' ' || raw[end - 1] == '\t')) {
+        --end;
+    }
+    const std::string_view trimmed = raw.substr(begin, end - begin);
+    if (trimmed.empty() || trimmed.size() > 64U) {
+        return {};
+    }
+    for (const char byte : trimmed) {
+        const auto value = static_cast<unsigned char>(byte);
+        if (value < 0x20U || value == 0x7fU) {
+            return {};
+        }
+    }
+    return std::string(trimmed);
+}
+
 VaultError locked_error() {
     return {VaultErrorCode::InvalidArgument, "vault is locked"};
+}
+
+// Unwraps a video's file key and opens a streaming authenticated reader over
+// its package. Callers must hold the vault mutex.
+Result<internal::PackageReader> open_package_reader(
+    const std::filesystem::path& root,
+    internal::Database& database,
+    const internal::SensitiveBuffer& master_key,
+    const std::int64_t video_id) {
+    auto row = database.query_video(video_id);
+    if (!row) {
+        return row.error();
+    }
+    auto key_record = database.query_video_key(video_id);
+    if (!key_record) {
+        return key_record.error();
+    }
+    auto wrapping_key = internal::derive_subkey(
+        master_key, kPackageWrappingSubkeyId, kPackageWrappingContext);
+    if (!wrapping_key) {
+        return wrapping_key.error();
+    }
+    auto unwrapped = internal::decrypt_xchacha20_poly1305(
+        key_record.value().wrapped, std::span(row.value().package_id),
+        key_record.value().nonce, wrapping_key.value(), VaultErrorCode::PackageModified);
+    if (!unwrapped) {
+        return unwrapped.error();
+    }
+    if (unwrapped.value().size() != 32U) {
+        return VaultError{VaultErrorCode::DatabaseCorrupt,
+            "the unwrapped file key has an invalid size"};
+    }
+    internal::SensitiveBuffer file_key(32U);
+    std::copy(unwrapped.value().begin(), unwrapped.value().end(), file_key.data());
+    // Best-effort wipe of the transient plaintext key copy.
+    std::fill(unwrapped.value().begin(), unwrapped.value().end(), 0U);
+    const auto package = root / L"vault-data" / row.value().package_relative_path;
+    return internal::PackageReader::open(package, std::move(file_key));
+}
+
+// Thumbnail AEAD associated data: video id (8 LE) || package id (16).
+std::array<unsigned char, 24> thumbnail_ad(
+    const std::int64_t video_id,
+    const internal::VideoRow& row) {
+    std::array<unsigned char, 24> ad{};
+    write_u64_le(std::span(ad).first(8U), static_cast<std::uint64_t>(video_id));
+    std::copy(row.package_id.begin(), row.package_id.end(), ad.begin() + 8U);
+    return ad;
+}
+
+// Decodes, encrypts, and stores a thumbnail. Callers must hold the vault
+// mutex. Used by the public generate_thumbnail and by import (best effort).
+Result<ThumbnailInfo> generate_thumbnail_locked(
+    const std::filesystem::path& root,
+    internal::Database& database,
+    const internal::SensitiveBuffer& master_key,
+    const std::int64_t video_id,
+    const std::uint32_t max_dimension) {
+    auto row = database.query_video(video_id);
+    if (!row) {
+        return row.error();
+    }
+    auto reader = open_package_reader(root, database, master_key, video_id);
+    if (!reader) {
+        return reader.error();
+    }
+    std::uint32_t width = 0U;
+    std::uint32_t height = 0U;
+    auto jpeg = internal::extract_thumbnail_jpeg(reader.value(), max_dimension, width, height);
+    if (!jpeg) {
+        return jpeg.error();
+    }
+
+    auto thumbnail_key = internal::derive_subkey(
+        master_key, kThumbnailSubkeyId, kThumbnailContext);
+    if (!thumbnail_key) {
+        return thumbnail_key.error();
+    }
+    const auto ad = thumbnail_ad(video_id, row.value());
+    internal::ThumbnailRow stored;
+    stored.mime = "image/jpeg";
+    stored.width = width;
+    stored.height = height;
+    internal::random_bytes(stored.nonce);
+    auto encrypted = internal::encrypt_xchacha20_poly1305(
+        jpeg.value(), ad, stored.nonce, thumbnail_key.value());
+    if (!encrypted) {
+        return encrypted.error();
+    }
+    stored.ciphertext = std::move(encrypted.value());
+    stored.created_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
+        std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    auto inserted = database.insert_thumbnail(video_id, stored);
+    if (!inserted) {
+        return inserted.error();
+    }
+
+    ThumbnailInfo info;
+    info.video_id = video_id;
+    info.width = width;
+    info.height = height;
+    info.mime = stored.mime;
+    info.bytes = std::move(jpeg.value());
+    return info;
 }
 
 struct Paths {
@@ -484,6 +622,11 @@ Result<std::int64_t> Vault::import_file(const std::filesystem::path& source_path
         std::filesystem::remove(final_package, ignored);
         return inserted.error();
     }
+    // Best-effort thumbnail at import time so the gallery shows media without
+    // a manual step. Non-video imports and undecodable formats fail quietly.
+    (void)generate_thumbnail_locked(
+        root_, impl.database_, impl.master_key_, inserted.value(),
+        kImportThumbnailDimension);
     return inserted.value();
 }
 
@@ -508,6 +651,7 @@ Result<std::vector<VideoInfo>> Vault::list_videos() const {
         info.package_sha256 = row.package_sha256;
         info.package_relative_path = row.package_relative_path;
         info.imported_at = row.imported_at;
+        info.tags = row.tag_names;
         videos.push_back(std::move(info));
     }
     return videos;
@@ -563,40 +707,7 @@ Result<std::vector<unsigned char>> Vault::read_video_range(
     if (!impl_) {
         return locked_error();
     }
-    auto& impl = *impl_;
-    auto row = impl.database_.query_video(video_id);
-    if (!row) {
-        return row.error();
-    }
-    auto key_record = impl.database_.query_video_key(video_id);
-    if (!key_record) {
-        return key_record.error();
-    }
-
-    auto wrapping_key = internal::derive_subkey(
-        impl.master_key_, kPackageWrappingSubkeyId, kPackageWrappingContext);
-    if (!wrapping_key) {
-        return wrapping_key.error();
-    }
-
-    auto unwrapped = internal::decrypt_xchacha20_poly1305(
-        key_record.value().wrapped, std::span(row.value().package_id),
-        key_record.value().nonce, wrapping_key.value(), VaultErrorCode::PackageModified);
-    if (!unwrapped) {
-        return unwrapped.error();
-    }
-    if (unwrapped.value().size() != 32U) {
-        return VaultError{VaultErrorCode::DatabaseCorrupt,
-            "the unwrapped file key has an invalid size"};
-    }
-
-    internal::SensitiveBuffer file_key(32U);
-    std::copy(unwrapped.value().begin(), unwrapped.value().end(), file_key.data());
-    // Best-effort wipe of the transient plaintext key copy.
-    std::fill(unwrapped.value().begin(), unwrapped.value().end(), 0U);
-
-    auto package = root_ / L"vault-data" / row.value().package_relative_path;
-    auto reader = internal::PackageReader::open(package, std::move(file_key));
+    auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
     if (!reader) {
         return reader.error();
     }
@@ -611,6 +722,155 @@ Result<std::vector<unsigned char>> Vault::read_video_range(
     }
     output.resize(got.value());
     return output;
+}
+
+Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
+    if (!reader) {
+        return reader.error();
+    }
+    auto probe = internal::probe_media(reader.value());
+    if (!probe) {
+        return probe.error();
+    }
+    MediaInfo info;
+    info.video_id = video_id;
+    info.duration_ms = probe.value().duration_ms;
+    info.width = probe.value().width;
+    info.height = probe.value().height;
+    info.rotation_degrees = probe.value().rotation_degrees;
+    info.codec_name = probe.value().codec_name;
+    return info;
+}
+
+Result<ThumbnailInfo> Vault::generate_thumbnail(
+    const std::int64_t video_id,
+    const std::uint32_t max_dimension) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return generate_thumbnail_locked(
+        root_, impl_->database_, impl_->master_key_, video_id, max_dimension);
+}
+
+Result<ThumbnailInfo> Vault::thumbnail(const std::int64_t video_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    auto row = impl.database_.query_thumbnail(video_id);
+    if (!row) {
+        return row.error();
+    }
+    auto video_row = impl.database_.query_video(video_id);
+    if (!video_row) {
+        return video_row.error();
+    }
+    auto thumbnail_key = internal::derive_subkey(
+        impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+    if (!thumbnail_key) {
+        return thumbnail_key.error();
+    }
+    auto decrypted = internal::decrypt_xchacha20_poly1305(
+        row.value().ciphertext, thumbnail_ad(video_id, video_row.value()),
+        row.value().nonce, thumbnail_key.value(), VaultErrorCode::PackageModified);
+    if (!decrypted) {
+        return decrypted.error();
+    }
+    ThumbnailInfo info;
+    info.video_id = video_id;
+    info.width = row.value().width;
+    info.height = row.value().height;
+    info.mime = row.value().mime;
+    info.bytes = std::move(decrypted.value());
+    return info;
+}
+
+Result<std::int64_t> Vault::add_tag(
+    const std::int64_t video_id,
+    const std::string_view tag_name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    const auto normalized = normalize_tag_name(tag_name);
+    if (normalized.empty()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "tag names must be non-empty, at most 64 bytes, and free of control characters"};
+    }
+    auto video = impl.database_.query_video(video_id);
+    if (!video) {
+        return video.error();
+    }
+    auto tag_id = impl.database_.ensure_tag(normalized);
+    if (!tag_id) {
+        return tag_id.error();
+    }
+    auto tagged = impl.database_.tag_video(video_id, tag_id.value());
+    if (!tagged) {
+        return tagged.error();
+    }
+    return tag_id.value();
+}
+
+Result<bool> Vault::remove_tag(
+    const std::int64_t video_id,
+    const std::int64_t tag_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.untag_video(video_id, tag_id);
+}
+
+Result<std::vector<TagInfo>> Vault::tags_for_video(
+    const std::int64_t video_id) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto tags = impl_->database_.tags_for_video(video_id);
+    if (!tags) {
+        return tags.error();
+    }
+    std::vector<TagInfo> result;
+    result.reserve(tags.value().size());
+    for (const auto& tag : tags.value()) {
+        TagInfo info;
+        info.id = tag.id;
+        info.name = tag.name;
+        info.video_count = tag.video_count;
+        result.push_back(std::move(info));
+    }
+    return result;
+}
+
+Result<std::vector<TagInfo>> Vault::list_tags() const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto tags = impl_->database_.list_tags();
+    if (!tags) {
+        return tags.error();
+    }
+    std::vector<TagInfo> result;
+    result.reserve(tags.value().size());
+    for (const auto& tag : tags.value()) {
+        TagInfo info;
+        info.id = tag.id;
+        info.name = tag.name;
+        info.video_count = tag.video_count;
+        result.push_back(std::move(info));
+    }
+    return result;
 }
 
 Result<bool> Vault::remove_video(const std::int64_t video_id) {
@@ -702,6 +962,16 @@ Result<bool> Vault::change_password(
     if (!old_wrapping_key) {
         return old_wrapping_key.error();
     }
+    auto old_thumbnail_key = internal::derive_subkey(
+        impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+    if (!old_thumbnail_key) {
+        return old_thumbnail_key.error();
+    }
+    auto new_thumbnail_key = internal::derive_subkey(
+        new_master.value(), kThumbnailSubkeyId, kThumbnailContext);
+    if (!new_thumbnail_key) {
+        return new_thumbnail_key.error();
+    }
 
     // New metadata keeps the vault id (the ready marker stays valid) and seals
     // a fresh verifier under the new verifier subkey.
@@ -778,8 +1048,38 @@ Result<bool> Vault::change_password(
     }
 
     // 4) The session continues under the new credentials.
+    auto old_master = std::move(impl.master_key_);
     impl.master_key_ = std::move(new_master.value());
     impl.parameters_ = parameters;
+
+    // 5) Re-encrypt stored thumbnails under the new thumbnail subkey so they
+    //    remain readable after the master key changed. Best effort: a damaged
+    //    thumbnail is dropped rather than failing the password change.
+    auto thumbnails = impl.database_.list_thumbnails();
+    if (thumbnails) {
+        for (auto& [thumb_video_id, stored] : thumbnails.value()) {
+            auto video_row = impl.database_.query_video(thumb_video_id);
+            if (!video_row) {
+                continue;
+            }
+            const auto ad = thumbnail_ad(thumb_video_id, video_row.value());
+            auto decrypted = internal::decrypt_xchacha20_poly1305(
+                stored.ciphertext, ad, stored.nonce, old_thumbnail_key.value(),
+                VaultErrorCode::CryptoFailure);
+            if (!decrypted) {
+                continue;
+            }
+            internal::ThumbnailRow rekeyed = stored;
+            internal::random_bytes(rekeyed.nonce);
+            auto encrypted = internal::encrypt_xchacha20_poly1305(
+                decrypted.value(), ad, rekeyed.nonce, new_thumbnail_key.value());
+            if (!encrypted) {
+                continue;
+            }
+            rekeyed.ciphertext = std::move(encrypted.value());
+            (void)impl.database_.insert_thumbnail(thumb_video_id, rekeyed);
+        }
+    }
     return true;
 }
 

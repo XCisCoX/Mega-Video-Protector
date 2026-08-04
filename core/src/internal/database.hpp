@@ -16,20 +16,37 @@ struct VideoRow {
     std::int64_t id{0};
     std::string display_name;
     std::uint64_t original_size{0U};
-    std::string package_relative_path;
     std::uint64_t package_size{0U};
     Sha256Digest package_sha256{};
+    std::string package_relative_path;
     std::uint32_t format_version{1U};
     std::uint32_t algorithm_id{1U};
     std::uint32_t chunk_size{0U};
     std::array<unsigned char, 16> package_id{};
     std::uint64_t imported_at{0U};
+    // Phase 7: tag names attached to this video (lowercase-sorted).
+    std::vector<std::string> tag_names;
+};
+
+struct TagRow {
+    std::int64_t id{0};
+    std::string name;
+    std::int64_t video_count{0};
 };
 
 struct WrappedVideoKey {
     // 32-byte file key + 16-byte AEAD tag under the wrapping subkey.
     std::array<unsigned char, 48> wrapped{};
     std::array<unsigned char, 24> nonce{};
+};
+
+struct ThumbnailRow {
+    std::string mime;
+    std::uint32_t width{0U};
+    std::uint32_t height{0U};
+    std::array<unsigned char, 24> nonce{};
+    std::vector<unsigned char> ciphertext;
+    std::uint64_t created_at{0U};
 };
 
 class Database final {
@@ -84,6 +101,29 @@ public:
 
     // Re-encrypts the whole database file with a new SQLCipher key.
     [[nodiscard]] Result<bool> rekey(const SensitiveBuffer& new_database_key);
+
+    // Phase 5: encrypted thumbnails.
+    [[nodiscard]] Result<bool> insert_thumbnail(
+        std::int64_t video_id,
+        const ThumbnailRow& row);
+
+    [[nodiscard]] Result<ThumbnailRow> query_thumbnail(
+        std::int64_t video_id) const;
+
+    [[nodiscard]] Result<std::vector<std::pair<std::int64_t, ThumbnailRow>>>
+    list_thumbnails() const;
+
+    // Phase 7: tags.
+    // Returns the id of the tag, creating it (case-insensitively) if missing.
+    [[nodiscard]] Result<std::int64_t> ensure_tag(const std::string& name);
+
+    [[nodiscard]] Result<bool> tag_video(std::int64_t video_id, std::int64_t tag_id);
+
+    [[nodiscard]] Result<bool> untag_video(std::int64_t video_id, std::int64_t tag_id);
+
+    [[nodiscard]] Result<std::vector<TagRow>> tags_for_video(std::int64_t video_id) const;
+
+    [[nodiscard]] Result<std::vector<TagRow>> list_tags() const;
 
     void close() noexcept;
     [[nodiscard]] bool is_open() const noexcept { return database_ != nullptr; }

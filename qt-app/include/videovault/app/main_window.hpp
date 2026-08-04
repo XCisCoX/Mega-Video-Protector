@@ -15,12 +15,16 @@ class QStackedWidget;
 class QTimer;
 class QEvent;
 class QObject;
+class QTreeWidget;
+class QTreeWidgetItem;
 
 template <typename T>
 class QFutureWatcher;
 
 namespace videovault::core {
 class Vault;
+struct ThumbnailInfo;
+struct TagInfo;
 template <typename T>
 class Result;
 } // namespace videovault::core
@@ -28,6 +32,14 @@ class Result;
 namespace videovault::app {
 
 struct VaultOperationResult;
+class PlayerWindow;
+
+// Snapshot of tag data loaded off the UI thread for the tag editor dialog.
+struct TagEditorData {
+    std::int64_t video_id{0};
+    std::vector<core::TagInfo> all_tags;
+    std::vector<core::TagInfo> video_tags;
+};
 
 class MainWindow final : public QMainWindow {
 public:
@@ -51,10 +63,19 @@ private:
     void beginImport();
     void finishImport();
     void refreshGallery();
-    void beginRemoveSelected();
+    void beginRemoveSelected(std::int64_t video_id = -1);
     void finishRemoveSelected();
     void beginChangePassword();
     void finishChangePassword();
+    void beginGenerateThumbnail(std::int64_t video_id = -1);
+    void finishGenerateThumbnail();
+    void beginPlayback(std::int64_t video_id);
+    std::int64_t selectedVideoId() const;
+    void setViewMode(int index);
+    void refreshTagFilter();
+    void beginEditTags(std::int64_t video_id);
+    void finishEditTags();
+    void showGalleryContextMenu(const QPoint& position);
     void setBusy(bool busy);
     void showSetup();
     void showLogin(const std::filesystem::path& path);
@@ -83,13 +104,22 @@ private:
     QLabel* unlockedLocation_{nullptr};
     QLabel* galleryStatus_{nullptr};
     QPushButton* importButton_{nullptr};
-    QPushButton* removeButton_{nullptr};
     QPushButton* changePasswordButton_{nullptr};
-    QListWidget* gallery_{nullptr};
+    QComboBox* viewModeCombo_{nullptr};
+    QComboBox* tagFilterCombo_{nullptr};
+    QStackedWidget* galleryStack_{nullptr};
+    QTreeWidget* detailsTree_{nullptr};
+    QListWidget* iconList_{nullptr};
+    PlayerWindow* playerWindow_{nullptr};
+    QLabel* statusCountLabel_{nullptr};
+    std::int64_t tagFilterId_{-1};
+    QString tagFilterName_;
     QTimer* autoLockTimer_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>* importWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<bool>>>* adminWatcher_{nullptr};
+    QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>* thumbnailWatcher_{nullptr};
+    QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
 };
