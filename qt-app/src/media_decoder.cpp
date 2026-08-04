@@ -20,6 +20,7 @@ extern "C" {
 #include <cstdint>
 #include <cstring>
 #include <filesystem>
+#include <limits>
 #include <mutex>
 #include <span>
 #include <string>
@@ -30,8 +31,9 @@ extern "C" {
 namespace videovault::app {
 namespace {
 
-constexpr std::size_t kAvioBufferSize = 64U * 1024U;
+constexpr std::size_t kAvioBufferSize = 128U * 1024U;
 constexpr std::int64_t kMaxAudioSamples = 1U << 20; // ~8.7 min of s16le stereo 48k
+constexpr std::uint64_t kDefaultStreamCacheBytes = 32U << 20; // 32 MiB
 
 QString av_error_message(const char* operation, const int status) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -77,32 +79,148 @@ struct SwrDeleter {
 };
 using SwrPtr = std::unique_ptr<SwrContext, SwrDeleter>;
 
-// Random-access plaintext source over the encrypted package. Each call goes
-// through Vault::read_video_range, which authenticates every touched chunk.
+// Read-ahead window cache: AVIO reads are served from one large in-memory
+// window of the plaintext package instead of one Vault::read_video_range call
+// (fresh package open + per-chunk decrypt) per tiny read. The window size is
+// the user-selectable streaming memory budget; windows are 1 MiB aligned and
+// refilled with a single big range read as the playhead approaches the end,
+// so playback never hits the disk/crypto path again until the window rolls.
+class StreamCache {
+public:
+    explicit StreamCache(const std::uint64_t budget) { set_budget(budget); }
+
+    // The mutex is not movable; the window state is moved over under the
+    // source's lock. This object is moved only during open(), before any
+    // concurrent access.
+    StreamCache(StreamCache&& other) noexcept
+        : budget_(other.budget()),
+          window_start_(other.window_start_),
+          data_(std::move(other.data_)) {}
+
+    StreamCache(const StreamCache&) = delete;
+    StreamCache& operator=(const StreamCache&) = delete;
+
+    void set_budget(const std::uint64_t budget) {
+        std::lock_guard<std::mutex> guard(mutex_);
+        budget_ = std::max<std::uint64_t>(budget, kMinBudget);
+    }
+
+    std::uint64_t budget() const {
+        std::lock_guard<std::mutex> guard(mutex_);
+        return budget_;
+    }
+
+    // Serves up to `size` bytes at `position` (file bounds in `file_size`).
+    // Returns the bytes copied (0 at/after EOF, -1 on an I/O error).
+    std::int64_t read(
+        const std::shared_ptr<videovault::core::Vault>& vault,
+        const std::int64_t video_id,
+        const std::int64_t position,
+        unsigned char* buffer,
+        const std::size_t size,
+        const std::uint64_t file_size) {
+        if (size == 0U) {
+            return 0;
+        }
+        if (position < 0 || static_cast<std::uint64_t>(position) >= file_size) {
+            return 0;
+        }
+        const auto pos = static_cast<std::uint64_t>(position);
+        const std::uint64_t window_budget = budget();
+        if (pos < window_start_ || pos >= window_start_ + data_.size()) {
+            if (!load_window(vault, video_id, pos, file_size, window_budget)) {
+                return -1;
+            }
+        }
+        const auto buffered = window_start_ + data_.size();
+        const auto take = std::min(size, static_cast<std::size_t>(buffered - pos));
+        std::memcpy(buffer, data_.data() + static_cast<std::size_t>(pos - window_start_), take);
+        // Low-water refill: once the read is within a quarter of the budget of
+        // the buffered end, pull the rest of the window into memory so the
+        // next reads never block on a fresh range read.
+        if (pos + take + window_budget / 4U >= buffered) {
+            extend_window(vault, video_id, file_size, window_budget);
+        }
+        return static_cast<std::int64_t>(take);
+    }
+
+    void clear() {
+        data_.clear();
+        window_start_ = kNoWindow;
+    }
+
+private:
+    static constexpr std::uint64_t kAlignment = 1U << 20; // 1 MiB
+    static constexpr std::uint64_t kMinBudget = 4U << 20; // 4 MiB
+    static constexpr std::uint64_t kNoWindow =
+        std::numeric_limits<std::uint64_t>::max();
+
+    bool load_window(
+        const std::shared_ptr<videovault::core::Vault>& vault,
+        const std::int64_t video_id,
+        const std::uint64_t position,
+        const std::uint64_t file_size,
+        const std::uint64_t budget) {
+        data_.clear();
+        window_start_ = position & ~(kAlignment - 1U);
+        return extend_window(vault, video_id, file_size, budget);
+    }
+
+    bool extend_window(
+        const std::shared_ptr<videovault::core::Vault>& vault,
+        const std::int64_t video_id,
+        const std::uint64_t file_size,
+        const std::uint64_t budget) {
+        const auto window_end = std::min(window_start_ + budget, file_size);
+        const auto buffered = window_start_ + data_.size();
+        if (window_end <= buffered) {
+            return true; // window fully loaded
+        }
+        auto got = vault->read_video_range(
+            video_id, buffered, static_cast<std::size_t>(window_end - buffered));
+        if (!got) {
+            return false;
+        }
+        data_.insert(data_.end(), got.value().begin(), got.value().end());
+        return true;
+    }
+
+    mutable std::mutex mutex_;
+    std::uint64_t budget_{kDefaultStreamCacheBytes};
+    std::uint64_t window_start_{kNoWindow};
+    std::vector<unsigned char> data_;
+};
+
+// Random-access plaintext source over the encrypted package. Reads are served
+// from the read-ahead window cache; each window load authenticates every
+// touched chunk through Vault::read_video_range exactly once.
 class VaultSource {
 public:
     VaultSource(
         std::shared_ptr<videovault::core::Vault> vault,
-        const std::int64_t video_id)
-        : vault_(std::move(vault)), video_id_(video_id) {}
+        const std::int64_t video_id,
+        const std::uint64_t cache_budget)
+        : vault_(std::move(vault)), video_id_(video_id), cache_(cache_budget) {}
 
     int read(unsigned char* buffer, const int size) {
         if (position_ >= plaintext_size_) {
             return AVERROR_EOF;
         }
-        auto got = vault_->read_video_range(
-            video_id_, position_, static_cast<std::size_t>(size));
-        if (!got) {
-            qWarning() << "vault read failed:" << got.error().technical_detail.c_str();
+        const auto got = cache_.read(
+            vault_, video_id_, static_cast<std::int64_t>(position_), buffer,
+            static_cast<std::size_t>(size), plaintext_size_);
+        if (got < 0) {
+            qWarning() << "vault read failed while buffering the video stream";
             return AVERROR(EIO);
         }
-        if (got.value().empty()) {
+        if (got == 0) {
             return AVERROR_EOF;
         }
-        std::memcpy(buffer, got.value().data(), got.value().size());
-        position_ += got.value().size();
-        return static_cast<int>(got.value().size());
+        position_ += static_cast<std::uint64_t>(got);
+        return static_cast<int>(got);
     }
+
+    void set_cache_budget(const std::uint64_t budget) { cache_.set_budget(budget); }
 
     std::int64_t seek(const std::int64_t offset, const int whence) {
         std::int64_t target = 0;
@@ -135,6 +253,7 @@ private:
     std::int64_t video_id_{0};
     std::uint64_t plaintext_size_{0};
     std::uint64_t position_{0};
+    StreamCache cache_;
 };
 
 int source_read_packet(void* opaque, unsigned char* buffer, const int size) {
@@ -209,7 +328,7 @@ public:
             return false;
         }
         handle_ = std::make_unique<FormatHandle>(
-            FormatHandle{VaultSource(vault, video_id), nullptr, nullptr});
+            FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});
         handle_->source.set_plaintext_size(package_size);
 
         AVIOContext* raw_io = avio_alloc_context(
@@ -279,11 +398,7 @@ public:
                 }
                 video_width_ = video_codec_->width;
                 video_height_ = video_codec_->height;
-                scaler_.reset(sws_getContext(
-                    video_codec_->width, video_codec_->height,
-                    video_codec_->pix_fmt,
-                    video_codec_->width, video_codec_->height,
-                    AV_PIX_FMT_BGRA, SWS_BILINEAR, nullptr, nullptr, nullptr));
+                rebuild_scaler();
             } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audio_stream_ == -1) {
                 audio_stream_ = static_cast<int>(index);
                 const AVCodec* decoder =
@@ -443,6 +558,17 @@ public:
     int audio_sample_rate() const { return audio_sample_rate_; }
     int audio_channels() const { return audio_channels_; }
 
+    void set_stream_cache_bytes(const std::size_t bytes) {
+        cache_budget_ = std::max<std::size_t>(bytes, std::size_t{4U << 20});
+        if (handle_) {
+            handle_->source.set_cache_budget(cache_budget_);
+        }
+    }
+
+    std::size_t stream_cache_bytes() const {
+        return static_cast<std::size_t>(cache_budget_);
+    }
+
 private:
     static std::int64_t frame_pts_ms_from_ts(
         const std::int64_t ts, const AVRational& time_base) {
@@ -456,19 +582,47 @@ private:
         if (!scaler_) {
             return QImage();
         }
+        const int output_width = display_width_ > 0 ? display_width_ : video_width_;
+        const int output_height = display_height_ > 0 ? display_height_ : video_height_;
         AvFramePtr rgb(av_frame_alloc());
         rgb->format = AV_PIX_FMT_BGRA;
-        rgb->width = video_width_;
-        rgb->height = video_height_;
+        rgb->width = output_width;
+        rgb->height = output_height;
         if (av_frame_get_buffer(rgb.get(), 0) < 0) {
             return QImage();
         }
         sws_scale(scaler_.get(), source->data, source->linesize, 0, source->height,
             rgb->data, rgb->linesize);
         QImage image(
-            rgb->data[0], video_width_, video_height_,
+            rgb->data[0], output_width, output_height,
             rgb->linesize[0], QImage::Format_RGB32);
         return image.copy();
+    }
+
+    // The player tells the decoder the surface size so sws converts straight
+    // to it (one scale instead of decode-scale + display-scale). Rebuilds the
+    // scaler only when the size actually changes. Public so MediaDecoder can
+    // forward it; only the decode worker thread calls it.
+public:
+    void set_display_size(const int width, const int height) {
+        if (width > 0 && height > 0
+            && (width != display_width_ || height != display_height_)) {
+            display_width_ = width;
+            display_height_ = height;
+            rebuild_scaler();
+        }
+    }
+
+    void rebuild_scaler() {
+        if (!video_codec_) {
+            return;
+        }
+        const int output_width = display_width_ > 0 ? display_width_ : video_width_;
+        const int output_height = display_height_ > 0 ? display_height_ : video_height_;
+        scaler_.reset(sws_getContext(
+            video_codec_->width, video_codec_->height, video_codec_->pix_fmt,
+            output_width, output_height, AV_PIX_FMT_BGRA,
+            SWS_BILINEAR, nullptr, nullptr, nullptr));
     }
 
     void append_audio(const AVFrame* decoded) {
@@ -513,6 +667,9 @@ private:
     int video_height_{0};
     int audio_sample_rate_{0};
     int audio_channels_{0};
+    std::uint64_t cache_budget_{kDefaultStreamCacheBytes};
+    int display_width_{0};
+    int display_height_{0};
 };
 
 MediaDecoder::MediaDecoder() : impl_(std::make_unique<Impl>()) {}
@@ -539,6 +696,26 @@ bool MediaDecoder::decode_next_video_frame(DecodedFrame* frame) {
 std::vector<std::int16_t> MediaDecoder::take_audio_samples() {
     return impl_->take_audio_samples();
 }
+
+void MediaDecoder::set_stream_cache_bytes(const std::size_t bytes) {
+    if (impl_) {
+        impl_->set_stream_cache_bytes(bytes);
+    }
+}
+
+void MediaDecoder::set_display_size(const int width, const int height) {
+    if (impl_) {
+        impl_->set_display_size(width, height);
+    }
+}
+
+std::size_t MediaDecoder::stream_cache_bytes() const {
+    if (!impl_) {
+        return 0U;
+    }
+    return impl_->stream_cache_bytes();
+}
+
 void MediaDecoder::close() { impl_->close(); }
 
 } // namespace videovault::app

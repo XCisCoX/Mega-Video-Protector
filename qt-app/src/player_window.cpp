@@ -2,17 +2,21 @@
 
 #include <QAudioFormat>
 #include <QCloseEvent>
+#include <QColor>
+#include <QComboBox>
 #include <QDateTime>
+#include <QElapsedTimer>
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
 #include <QMouseEvent>
-#include <QPixmap>
+#include <QPainter>
 #include <QResizeEvent>
 #include <QSettings>
 #include <QVBoxLayout>
 
 #include <algorithm>
+#include <chrono>
 #include <cmath>
 #include <cstring>
 
@@ -33,6 +37,11 @@ void AudioSink::clear() {
     std::lock_guard<std::mutex> guard(mutex_);
     buffer_.clear();
     read_cursor_ = 0;
+}
+
+std::size_t AudioSink::buffered_samples() const {
+    std::lock_guard<std::mutex> guard(mutex_);
+    return buffer_.size() - read_cursor_;
 }
 
 qint64 AudioSink::readData(char* data, qint64 maxSize) {
@@ -63,19 +72,19 @@ PlayerWindow::PlayerWindow(
     setMouseTracking(true);
 
     QSettings settings;
-    volume_percent_ = settings.value(QStringLiteral("player/volume"), 100).toInt();
-    volume_percent_ = std::clamp(volume_percent_, 0, 100);
+    volumePercent_ = settings.value(QStringLiteral("player/volume"), 100).toInt();
+    volumePercent_ = std::clamp(volumePercent_, 0, 100);
     muted_ = settings.value(QStringLiteral("player/muted"), false).toBool();
+    const int cache_mib =
+        settings.value(QStringLiteral("player/streamCacheMib"), 32).toInt();
 
     auto* layout = new QVBoxLayout(this);
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    surface_ = new QLabel(this);
+    surface_ = new VideoSurface(this);
     surface_->setMinimumSize(320, 200);
-    surface_->setAlignment(Qt::AlignCenter);
-    surface_->setStyleSheet(QStringLiteral("background-color: #000000;"));
-    surface_->setMouseTracking(true);
+    surface_->setText(QStringLiteral("Loading…"));
     surface_->installEventFilter(this);
     layout->addWidget(surface_, 1);
 
@@ -105,14 +114,32 @@ PlayerWindow::PlayerWindow(
     muteButton_->setChecked(muted_);
     volumeSlider_ = new QSlider(Qt::Horizontal, controlsBar_);
     volumeSlider_->setRange(0, 100);
-    volumeSlider_->setValue(volume_percent_);
+    volumeSlider_->setValue(volumePercent_);
     volumeSlider_->setFixedWidth(110);
+    auto* cacheLabel = new QLabel(QStringLiteral("Cache:"), controlsBar_);
+    cacheCombo_ = new QComboBox(controlsBar_);
+    const std::vector<std::pair<QString, int>> cache_options = {
+        {QStringLiteral("4 MB"), 4}, {QStringLiteral("8 MB"), 8},
+        {QStringLiteral("16 MB"), 16}, {QStringLiteral("32 MB"), 32},
+        {QStringLiteral("64 MB"), 64}, {QStringLiteral("128 MB"), 128}};
+    int cache_index = 2; // 16 MB fallback
+    for (std::size_t i = 0U; i < cache_options.size(); ++i) {
+        cacheCombo_->addItem(cache_options[i].first, cache_options[i].second);
+        if (cache_options[i].second == cache_mib) {
+            cache_index = static_cast<int>(i);
+        }
+    }
+    cacheCombo_->setCurrentIndex(cache_index);
+    cacheCombo_->setToolTip(QStringLiteral(
+        "How much of the video to buffer in memory while streaming"));
     fullscreenButton_ = new QPushButton(QStringLiteral("Fullscreen"), controlsBar_);
     row->addWidget(playButton_);
     row->addWidget(positionLabel_);
     row->addStretch(1);
     row->addWidget(muteButton_);
     row->addWidget(volumeSlider_);
+    row->addWidget(cacheLabel);
+    row->addWidget(cacheCombo_);
     row->addWidget(fullscreenButton_);
     controlsLayout->addWidget(positionSlider_);
     controlsLayout->addLayout(row);
@@ -123,7 +150,7 @@ PlayerWindow::PlayerWindow(
         doSeek(positionSlider_->value());
     });
     connect(volumeSlider_, &QSlider::valueChanged, this, [this](const int value) {
-        volume_percent_ = value;
+        volumePercent_ = value;
         applyVolume();
         QSettings settings;
         settings.setValue(QStringLiteral("player/volume"), value);
@@ -135,93 +162,54 @@ PlayerWindow::PlayerWindow(
         settings.setValue(QStringLiteral("player/muted"), checked);
     });
     connect(fullscreenButton_, &QPushButton::clicked, this, [this] { toggleFullscreen(); });
+    connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged), this,
+        [this](int) {
+            const std::size_t bytes = static_cast<std::size_t>(
+                cacheCombo_->currentData().toInt()) << 20;
+            decoder_.set_stream_cache_bytes(bytes);
+            QSettings settings;
+            settings.setValue(QStringLiteral("player/streamCacheMib"),
+                cacheCombo_->currentData().toInt());
+        });
 
     uiHideTimer_.setSingleShot(true);
     uiHideTimer_.setInterval(2500);
     connect(&uiHideTimer_, &QTimer::timeout, this, [this] {
-        if (fullscreen_ && playing_) {
+        if (fullscreen_ && playing_.load()) {
             hideControls();
         }
     });
 
-    QString open_error;
-    if (!decoder_.open(vault, video_id, &open_error)) {
-        surface_->setText(QStringLiteral("Cannot play this video:\n%1").arg(open_error));
-        playButton_->setEnabled(false);
-        positionSlider_->setEnabled(false);
-        volumeSlider_->setEnabled(false);
-        muteButton_->setEnabled(false);
-        fullscreenButton_->setEnabled(false);
-        return;
-    }
-
-    const std::int64_t duration = decoder_.duration_ms();
-    positionSlider_->setRange(0, static_cast<int>(std::max<std::int64_t>(duration, 1)));
-    positionSlider_->setValue(0);
-    updatePositionLabel();
-
-    // Audio: create the sink and output, then prefill the sink with the first
-    // ~200 ms of decoded audio before start(). QAudioOutput goes to IdleState
-    // (and stays there) when readData() returns 0 on its first pull, so an
-    // empty sink at startup leaves the sound dead until an explicit resume.
-    std::int64_t initial_ms = 0;
-    QImage initial_frame;
-    if (decoder_.has_audio()) {
-        QAudioFormat format;
-        format.setSampleRate(decoder_.audio_sample_rate());
-        format.setChannelCount(decoder_.audio_channels());
-        format.setSampleSize(16);
-        format.setCodec(QStringLiteral("audio/pcm"));
-        format.setByteOrder(QAudioFormat::LittleEndian);
-        format.setSampleType(QAudioFormat::SignedInt);
-        audioSink_ = new AudioSink(this);
-        audioOutput_ = new QAudioOutput(format, this);
-        // ~125 ms of playback buffered in the device keeps A/V within a
-        // fraction of a second instead of up to half a second.
-        audioOutput_->setBufferSize(decoder_.audio_sample_rate() / 2);
-        while (initial_ms < 200) {
-            feedAudio();
-            DecodedFrame frame;
-            if (!decoder_.decode_next_video_frame(&frame)) {
-                break;
-            }
-            initial_ms = frame.pts_ms;
-            initial_frame = frame.image;
-        }
-        feedAudio();
-        applyVolume();
-        audioOutput_->start(audioSink_);
-    }
-    if (!initial_frame.isNull()) {
-        lastPtsMs_ = initial_ms;
-        wallClockBaseMs_ = initial_ms;
-        lastFrame_ = initial_frame;
-        showFrame(initial_frame);
-        positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
-            initial_ms, positionSlider_->maximum())));
-        updatePositionLabel();
-    }
+    decoder_.set_stream_cache_bytes(
+        static_cast<std::size_t>(cacheCombo_->currentData().toInt()) << 20);
+    surfaceSize_ = surface_->size();
 
     timer_.setInterval(16);
     connect(&timer_, &QTimer::timeout, this, [this] { tick(); });
     timer_.start();
-    playing_ = true;
-    wallClockStartMs_ = QDateTime::currentMSecsSinceEpoch();
+    playing_.store(true);
+    worker_ = std::thread(&PlayerWindow::workerLoop, this);
 }
 
 PlayerWindow::~PlayerWindow() {
     timer_.stop();
+    quit_.store(true);
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    decoder_.close();
     if (audioOutput_ != nullptr) {
         audioOutput_->stop();
     }
-    decoder_.close();
 }
 
 void PlayerWindow::resizeEvent(QResizeEvent* event) {
     QDialog::resizeEvent(event);
-    if (!lastFrame_.isNull()) {
-        showFrame(lastFrame_);
+    {
+        std::lock_guard<std::mutex> guard(sizeMutex_);
+        surfaceSize_ = surface_->size();
     }
+    surface_->update();
 }
 
 void PlayerWindow::closeEvent(QCloseEvent* event) {
@@ -283,16 +271,168 @@ bool PlayerWindow::eventFilter(QObject* watched, QEvent* event) {
     return QDialog::eventFilter(watched, event);
 }
 
-void PlayerWindow::togglePlayPause() {
-    playing_ = !playing_;
-    playButton_->setText(playing_ ? QStringLiteral("Pause") : QStringLiteral("Play"));
-    if (playing_) {
-        // Restart from the beginning when the video ended.
-        if (lastPtsMs_ >= decoder_.duration_ms() - 250) {
-            doSeek(0);
+// Runs on the decode worker thread. Streams through MediaDecoder (whose
+// read-ahead window may block the worker on refills — never the UI), paces
+// frames against a monotonic real-time clock, and publishes frames/audio for
+// the UI thread to consume.
+void PlayerWindow::workerLoop() {
+    QString open_error;
+    if (!decoder_.open(vault_, video_id_, &open_error)) {
+        {
+            std::lock_guard<std::mutex> guard(errorMutex_);
+            openError_ = open_error;
         }
-        wallClockBaseMs_ = video_position_ms();
-        wallClockStartMs_ = QDateTime::currentMSecsSinceEpoch();
+        openFailed_.store(true);
+        playing_.store(false);
+        return;
+    }
+
+    durationMs_.store(decoder_.duration_ms());
+    if (decoder_.has_audio()) {
+        audioSampleRate_.store(decoder_.audio_sample_rate());
+        audioChannels_.store(decoder_.audio_channels());
+        audioReady_.store(true);
+    }
+
+    QElapsedTimer clock;
+    clock.start();
+    std::int64_t clock_base_ms = 0;
+    std::int64_t clock_start_elapsed = clock.elapsed();
+    std::int64_t last_pts = 0;
+
+    while (!quit_.load()) {
+        if (seekRequested_.exchange(false)) {
+            const std::int64_t target = seekTargetMs_.load();
+            decoder_.seek_to(target);
+            clock_base_ms = target;
+            clock_start_elapsed = clock.elapsed();
+            last_pts = target;
+            DecodedFrame frame;
+            if (decoder_.decode_next_video_frame(&frame)) {
+                last_pts = frame.pts_ms;
+                publishFrame(frame.image, frame.pts_ms);
+            }
+            feedAudio();
+            continue;
+        }
+        if (rebaseRequested_.exchange(false)) {
+            // Re-anchor the clock at the current position (pause/resume).
+            clock_base_ms = last_pts;
+            clock_start_elapsed = clock.elapsed();
+        }
+        if (!playing_.load()) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(10));
+            continue;
+        }
+        const std::int64_t elapsed = clock.elapsed();
+        const std::int64_t target = clock_base_ms + (elapsed - clock_start_elapsed);
+        if (last_pts >= target) {
+            std::this_thread::sleep_for(std::chrono::milliseconds(2));
+            continue;
+        }
+        feedAudio();
+        // A/V hold: if the sink is holding more than ~0.8 s of audio, the
+        // device is draining slower than real time — hold the video instead of
+        // reading Qt's flaky processedUSecs clock (which throttled playback
+        // whenever the UI thread was busy publishing frames).
+        const int rate = audioSampleRate_.load();
+        const int channels = audioChannels_.load();
+        if (rate > 0 && channels > 0) {
+            AudioSink* sink = audioSinkAtomic_.load();
+            if (sink != nullptr
+                && sink->buffered_samples()
+                    > static_cast<std::size_t>(rate) * static_cast<std::size_t>(channels) * 4U / 5U) {
+                std::this_thread::sleep_for(std::chrono::milliseconds(10));
+                continue;
+            }
+        }
+        DecodedFrame frame;
+        if (!decoder_.decode_next_video_frame(&frame)) {
+            // EOF: park until the user seeks or plays again.
+            ended_.store(true);
+            playing_.store(false);
+            std::this_thread::sleep_for(std::chrono::milliseconds(50));
+            continue;
+        }
+        last_pts = frame.pts_ms;
+        playheadMs_.store(last_pts);
+        publishFrame(frame.image, last_pts);
+    }
+    decoder_.close();
+}
+
+void PlayerWindow::publishFrame(const QImage& image, const std::int64_t pts_ms) {
+    QSize size;
+    {
+        std::lock_guard<std::mutex> guard(sizeMutex_);
+        size = surfaceSize_;
+    }
+    if (!size.isEmpty()) {
+        // sws converts the next frames straight to the surface size, so the
+        // published image is already display-sized (no second scale pass).
+        decoder_.set_display_size(size.width(), size.height());
+    }
+    {
+        std::lock_guard<std::mutex> guard(frameMutex_);
+        latestFrame_ = image;
+    }
+    frameDirty_.store(true);
+}
+
+void PlayerWindow::feedAudio() {
+    AudioSink* sink = audioSinkAtomic_.load();
+    if (sink == nullptr) {
+        return;
+    }
+    auto samples = decoder_.take_audio_samples();
+    if (!samples.empty()) {
+        sink->append(samples.data(), samples.size());
+    }
+    // Backpressure: never let the sink buffer more than ~1 s of audio while
+    // the decoder catches up after a stall or seek.
+    const int rate = audioSampleRate_.load();
+    if (rate > 0 && sink->buffered_samples() > static_cast<std::size_t>(rate)) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(15));
+    }
+}
+
+void PlayerWindow::requestSeek(const std::int64_t target_ms) {
+    seekTargetMs_.store(target_ms);
+    seekRequested_.store(true);
+}
+
+void PlayerWindow::doSeek(const std::int64_t target_ms) {
+    requestSeek(target_ms);
+    if (audioSink_ != nullptr) {
+        audioSink_->clear();
+    }
+    if (audioOutput_ != nullptr) {
+        audioOutput_->stop();
+        audioOutput_->start(audioSink_);
+        if (!playing_.load()) {
+            audioOutput_->suspend();
+        }
+    }
+    audioOffsetMs_ = target_ms;
+    playheadMs_.store(target_ms);
+    positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
+        target_ms, positionSlider_->maximum())));
+    updatePositionLabel();
+}
+
+void PlayerWindow::togglePlayPause() {
+    if (ended_.load()) {
+        ended_.store(false);
+        requestSeek(0);
+        if (audioSink_ != nullptr) {
+            audioSink_->clear();
+        }
+    }
+    playing_.store(!playing_.load());
+    playButton_->setText(playing_.load()
+        ? QStringLiteral("Pause") : QStringLiteral("Play"));
+    if (playing_.load()) {
+        rebaseRequested_.store(true);
         if (audioOutput_ != nullptr) {
             audioOutput_->resume();
         }
@@ -309,55 +449,10 @@ void PlayerWindow::togglePlayPause() {
 }
 
 void PlayerWindow::seekRelative(const std::int64_t delta_ms) {
+    const std::int64_t duration = durationMs_.load();
     const std::int64_t target = std::clamp<std::int64_t>(
-        video_position_ms() + delta_ms, 0, decoder_.duration_ms());
+        playheadMs_.load() + delta_ms, 0, duration > 0 ? duration : playheadMs_.load());
     doSeek(target);
-}
-
-void PlayerWindow::doSeek(const std::int64_t target_ms) {
-    decoder_.seek_to(target_ms);
-    if (audioSink_ != nullptr) {
-        audioSink_->clear();
-    }
-    // Decode the first frame at the target so the seek is visible instantly
-    // (audio samples from this read go back into the refilled sink).
-    std::int64_t shown_ms = target_ms;
-    QImage shown;
-    DecodedFrame frame;
-    if (decoder_.decode_next_video_frame(&frame)) {
-        shown_ms = frame.pts_ms;
-        shown = frame.image;
-    }
-    feedAudio();
-    if (audioOutput_ != nullptr) {
-        // stop()+start() restarts the processing clock (processedUSecs -> 0)
-        // so the offset-based clock below stays exact after the seek.
-        audioOutput_->stop();
-        audioOutput_->start(audioSink_);
-        if (!playing_) {
-            audioOutput_->suspend();
-        }
-    }
-    audioClockOffsetMs_ = target_ms;
-    wallClockBaseMs_ = shown_ms;
-    wallClockStartMs_ = QDateTime::currentMSecsSinceEpoch();
-    lastPtsMs_ = shown_ms;
-    positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
-        shown_ms, positionSlider_->maximum())));
-    updatePositionLabel();
-    if (!shown.isNull()) {
-        showFrame(shown);
-    }
-}
-
-std::int64_t PlayerWindow::current_playhead_ms() const {
-    // The audio clock is authoritative only while the device is actively
-    // consuming samples; while it is idle/stopped (startup, seek reset) it
-    // reports 0, which would race the video ahead at decode speed.
-    if (audioOutput_ != nullptr && audioOutput_->state() == QAudio::ActiveState) {
-        return audioClockOffsetMs_ + audioOutput_->processedUSecs() / 1000;
-    }
-    return wallClockBaseMs_ + (QDateTime::currentMSecsSinceEpoch() - wallClockStartMs_);
 }
 
 void PlayerWindow::setVolumePercent(const int percent) {
@@ -386,7 +481,7 @@ void PlayerWindow::toggleFullscreen() {
 
 void PlayerWindow::applyVolume() {
     if (audioOutput_ != nullptr) {
-        audioOutput_->setVolume(muted_ ? 0.0f : (volume_percent_ / 100.0f));
+        audioOutput_->setVolume(muted_ ? 0.0f : (volumePercent_ / 100.0f));
     }
     muteButton_->setText(muted_ ? QStringLiteral("Unmute") : QStringLiteral("Mute"));
 }
@@ -403,85 +498,83 @@ void PlayerWindow::showControls() {
 }
 
 void PlayerWindow::hideControls() {
-    if (fullscreen_ && playing_) {
+    if (fullscreen_ && playing_.load()) {
         controlsBar_->hide();
         setCursor(Qt::BlankCursor);
     }
 }
 
-std::int64_t PlayerWindow::audio_position_ms() const {
-    if (audioOutput_ == nullptr) {
-        return -1;
+void PlayerWindow::tick() {
+    // Open-failure feedback.
+    if (openFailed_.load() && !errorShown_) {
+        errorShown_ = true;
+        QString message;
+        {
+            std::lock_guard<std::mutex> guard(errorMutex_);
+            message = openError_;
+        }
+        surface_->setText(QStringLiteral("Cannot play this video:\n%1").arg(message));
+        playButton_->setEnabled(false);
+        positionSlider_->setEnabled(false);
     }
-    return audioClockOffsetMs_ + audioOutput_->processedUSecs() / 1000;
-}
 
-std::int64_t PlayerWindow::video_position_ms() const {
-    return lastPtsMs_;
-}
+    // Create the audio device once the worker has opened the stream.
+    if (!audioSetupDone_ && audioReady_.load()) {
+        audioSetupDone_ = true;
+        QAudioFormat format;
+        format.setSampleRate(audioSampleRate_.load());
+        format.setChannelCount(audioChannels_.load());
+        format.setSampleSize(16);
+        format.setCodec(QStringLiteral("audio/pcm"));
+        format.setByteOrder(QAudioFormat::LittleEndian);
+        format.setSampleType(QAudioFormat::SignedInt);
+        audioSink_ = new AudioSink(this);
+        audioSinkAtomic_.store(audioSink_);
+        audioOutput_ = new QAudioOutput(format, this);
+        audioOutput_->setBufferSize(audioSampleRate_.load() / 2);
+        applyVolume();
+        audioOutput_->start(audioSink_);
+        if (!playing_.load()) {
+            audioOutput_->suspend();
+        }
+    }
 
-void PlayerWindow::feedAudio() {
-    if (audioSink_ == nullptr) {
-        return;
-    }
-    auto samples = decoder_.take_audio_samples();
-    if (!samples.empty()) {
-        audioSink_->append(samples.data(), samples.size());
-    }
-    // QAudioOutput parks itself in IdleState and stops pulling when a read
-    // comes back empty; any subsequent data is ignored until an explicit
-    // resume. Wake it whenever there is a chance new samples just arrived.
-    if (audioOutput_ != nullptr
+    // QAudioOutput parks in IdleState (and stops pulling) after an empty read;
+    // wake it while there may be fresh samples.
+    if (audioOutput_ != nullptr && playing_.load()
         && (audioOutput_->state() == QAudio::IdleState
             || audioOutput_->state() == QAudio::StoppedState)) {
         audioOutput_->start(audioSink_);
     }
-}
 
-void PlayerWindow::tick() {
-    if (!playing_) {
-        return;
-    }
-    const std::int64_t target = current_playhead_ms();
-
-    // Decode frames up to the playhead. The video must never run ahead of the
-    // audio clock, so skip decoding entirely once lastPtsMs_ already reached
-    // the target — otherwise a single decoded frame per 16 ms tick plays
-    // low-fps content at 2-6x real speed and A/V drift grows unbounded.
-    for (int guard = 0; guard < 16; ++guard) {
-        feedAudio();
-        if (lastPtsMs_ >= target) {
-            break;
+    // Paint the latest frame from the worker.
+    if (frameDirty_.exchange(false)) {
+        QImage image;
+        {
+            std::lock_guard<std::mutex> guard(frameMutex_);
+            image = latestFrame_;
         }
-        DecodedFrame frame;
-        if (!decoder_.decode_next_video_frame(&frame)) {
-            // EOF: pause at the end.
-            playing_ = false;
-            playButton_->setText(QStringLiteral("Play"));
-            positionSlider_->setValue(positionSlider_->maximum());
-            updatePositionLabel();
-            return;
-        }
-        lastPtsMs_ = frame.pts_ms;
-        showFrame(frame.image);
-        positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
-            frame.pts_ms, positionSlider_->maximum())));
-        if (frame.pts_ms >= target) {
-            break;
+        if (!image.isNull()) {
+            lastFrame_ = image;
+            surface_->setFrame(image);
         }
     }
+
+    // Seek-bar range becomes known once the worker reports the duration.
+    const std::int64_t duration = durationMs_.load();
+    if (duration > 0 && positionSlider_->maximum() != static_cast<int>(duration)) {
+        positionSlider_->setRange(0, static_cast<int>(std::max<std::int64_t>(duration, 1)));
+    }
+
+    const std::int64_t pts = playheadMs_.load();
+    positionSlider_->setValue(static_cast<int>(std::min<std::int64_t>(
+        pts, positionSlider_->maximum())));
     updatePositionLabel();
-}
 
-void PlayerWindow::showFrame(const QImage& image) {
-    lastFrame_ = image;
-    if (image.isNull()) {
-        return;
+    if (ended_.load() && duration > 0) {
+        playButton_->setText(QStringLiteral("Play"));
+        positionSlider_->setValue(positionSlider_->maximum());
     }
-    const QSize fitted = image.size().scaled(
-        surface_->size(), Qt::KeepAspectRatio);
-    surface_->setPixmap(QPixmap::fromImage(image.scaled(
-        fitted, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
 }
 
 QString PlayerWindow::formatTime(const std::int64_t ms) const {
@@ -502,7 +595,7 @@ QString PlayerWindow::formatTime(const std::int64_t ms) const {
 
 void PlayerWindow::updatePositionLabel() {
     positionLabel_->setText(QStringLiteral("%1 / %2")
-        .arg(formatTime(video_position_ms()), formatTime(decoder_.duration_ms())));
+        .arg(formatTime(playheadMs_.load()), formatTime(durationMs_.load())));
 }
 
 } // namespace videovault::app

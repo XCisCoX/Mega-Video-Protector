@@ -249,6 +249,12 @@ int main() {
         return fail("The fixture's audio stream must be detected as 48 kHz stereo.");
     }
 
+    // The streaming cache budget is settable and applies to the decoder.
+    decoder.set_stream_cache_bytes(8U << 20);
+    if (decoder.stream_cache_bytes() != (8U << 20)) {
+        return fail("The streaming cache budget must be settable.");
+    }
+
     // Decode a bounded number of frames; the fixture has 20.
     int video_frames = 0;
     bool first_frame_valid = false;
@@ -292,6 +298,19 @@ int main() {
     auto samples = decoder.take_audio_samples();
     if (samples.empty()) {
         return fail("Decoding the fixture must produce audio samples.");
+    }
+
+    // Display-size decoding: sws must output exactly the requested size.
+    if (!decoder.seek_to(0)) {
+        return fail("Seeking back to the start must succeed.");
+    }
+    decoder.set_display_size(32, 32);
+    videovault::app::DecodedFrame small;
+    if (!decoder.decode_next_video_frame(&small)
+        || small.image.isNull()
+        || small.image.width() != 32
+        || small.image.height() != 32) {
+        return fail("Display-size decoding must output the requested 32x32 size.");
     }
 
     std::printf("Playback decode checks succeeded (%d frames, %zu audio samples).\n",

@@ -44,10 +44,22 @@ public:
     int video_width() const;
     int video_height() const;
 
-    // True when an audio stream was found and its decoder is open.
+    // True when an audio stream is available and configured.
     bool has_audio() const;
     int audio_sample_rate() const;
     int audio_channels() const;
+
+    // Streaming memory budget for the read-ahead window (bytes): how much of
+    // the video the player pulls into RAM ahead of the playhead. Larger values
+    // prefetch more (fewer disk/decrypt hits, more memory); applies to the
+    // next window load. Clamped to >= 4 MiB.
+    void set_stream_cache_bytes(std::size_t bytes);
+    std::size_t stream_cache_bytes() const;
+
+    // Decodes frames directly at the given display size (sws scale target),
+    // so the player avoids a second scaling pass. Rebuilds the scaler only
+    // when the size changes. Safe to call only from the decode thread.
+    void set_display_size(int width, int height);
 
     // Seeks to a presentation time (ms). Buffered audio is discarded.
     bool seek_to(std::int64_t ms);
