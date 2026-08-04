@@ -38,17 +38,22 @@ jobs:
           arch: x64
 
       # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
-      # vcpkg copies may not resolve, so bootstrap a fresh registry clone.
+      # vcpkg copies may not resolve. A FULL clone is required: a shallow
+      # clone does not contain the baseline commit, so `git show
+      # <baseline>:versions/baseline.json` fails ("failed to git show").
       - name: Bootstrap vcpkg
         shell: pwsh
         run: |
-          git clone --depth 1 https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
           & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
 
       - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
         shell: pwsh
         run: |
+          # --vcpkg-root overrides the runner's VS-installed VCPKG_ROOT env
+          # (otherwise vcpkg detects the temp root and warns about the mismatch).
           & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
+            --vcpkg-root="$env:RUNNER_TEMP\vcpkg" `
             --triplet x64-windows `
             --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
 
