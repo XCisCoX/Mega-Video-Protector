@@ -16,14 +16,13 @@
 #include <vector>
 
 class QAudioFormat;
-
-namespace videovault::core {
-class Vault;
-} // namespace videovault::core
+class QKeyEvent;
+class QMouseEvent;
 
 namespace videovault::app {
 
-// Pull-mode PCM sink fed by the decoder thread of the player window.
+// Pull-mode QIODevice that QAudioOutput reads decoded PCM from. The decode
+// loop appends s16le samples; the audio thread drains them at its own pace.
 class AudioSink final : public QIODevice {
     Q_OBJECT
 public:
@@ -37,18 +36,18 @@ public:
     qint64 writeData(const char* data, qint64 maxSize) override;
 
 private:
+    std::mutex mutex_;
     std::vector<std::int16_t> buffer_;
     std::size_t read_cursor_{0};
-    std::mutex mutex_;
 };
 
-// Full-screen-friendly video player dialog. Streams the encrypted video in
-// memory through MediaDecoder (Vault::read_video_range -> FFmpeg custom AVIO);
-// audio is fed to a QAudioOutput in pull mode from the same decode stream.
+// PotPlayer-style window: black video surface, seek bar with live time,
+// volume slider with mute, fullscreen (double-click / button / F), and
+// keyboard shortcuts (Space play/pause, Left/Right ±5 s, Up/Down volume).
 class PlayerWindow final : public QDialog {
     Q_OBJECT
 public:
-    explicit PlayerWindow(
+    PlayerWindow(
         const std::shared_ptr<videovault::core::Vault>& vault,
         std::int64_t video_id,
         const QString& title,
@@ -58,36 +57,56 @@ public:
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
-
-private slots:
-    void togglePlayPause();
-    void sliderReleased();
-    void tick();
+    void keyPressEvent(QKeyEvent* event) override;
+    void mouseDoubleClickEvent(QMouseEvent* event) override;
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
 private:
-    void showFrame(const QImage& image);
-    void updatePositionLabel();
+    void togglePlayPause();
+    void seekRelative(std::int64_t delta_ms);
+    void doSeek(std::int64_t target_ms);
+    std::int64_t current_playhead_ms() const;
+    void setVolumePercent(int percent);
+    void toggleMute();
+    void toggleFullscreen();
+    void applyVolume();
+    void showControls();
+    void hideControls();
     std::int64_t audio_position_ms() const;
     std::int64_t video_position_ms() const;
     void feedAudio();
+    void tick();
+    void showFrame(const QImage& image);
+    void updatePositionLabel();
+    QString formatTime(std::int64_t ms) const;
 
-    MediaDecoder decoder_;
     std::shared_ptr<videovault::core::Vault> vault_;
     std::int64_t video_id_{0};
+    MediaDecoder decoder_;
 
     QLabel* surface_{nullptr};
+    QWidget* controlsBar_{nullptr};
     QPushButton* playButton_{nullptr};
     QSlider* positionSlider_{nullptr};
     QLabel* positionLabel_{nullptr};
-    QTimer timer_;
-    QImage lastFrame_;
+    QPushButton* muteButton_{nullptr};
+    QSlider* volumeSlider_{nullptr};
+    QPushButton* fullscreenButton_{nullptr};
 
-    QAudioOutput* audioOutput_{nullptr};
     AudioSink* audioSink_{nullptr};
+    QAudioOutput* audioOutput_{nullptr};
+    QTimer timer_;
+    QTimer uiHideTimer_;
+
     bool playing_{false};
-    std::int64_t wallClockStartMs_{0};
+    bool fullscreen_{false};
+    bool muted_{false};
+    int volume_percent_{100};
+    std::int64_t audioClockOffsetMs_{0};
     std::int64_t wallClockBaseMs_{0};
+    std::int64_t wallClockStartMs_{0};
     std::int64_t lastPtsMs_{0};
+    QImage lastFrame_;
 };
 
 } // namespace videovault::app

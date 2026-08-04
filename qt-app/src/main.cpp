@@ -84,6 +84,69 @@ int main(int argc, char* argv[]) {
             font-weight: 600;
         }
         QPushButton[primary="true"]:hover { background: #627cf0; }
+        QDialog { background: #0c0f15; }
+        QTreeWidget#gallery, QListWidget#gallery {
+            background: #10151d;
+            alternate-background-color: #161c27;
+            color: #e2e7ef;
+            border: none;
+            outline: none;
+        }
+        QTreeWidget#gallery::item, QListWidget#gallery::item {
+            color: #e2e7ef;
+            padding: 4px;
+        }
+        QTreeWidget#gallery::item:selected, QListWidget#gallery::item:selected {
+            background: #2b3a63;
+            color: #ffffff;
+        }
+        QTreeWidget#gallery::item:hover, QListWidget#gallery::item:hover {
+            background: #232c3d;
+        }
+        QHeaderView { background: #1a202c; color: #aab6c8; }
+        QHeaderView::section {
+            background: #1a202c;
+            color: #aab6c8;
+            border: none;
+            border-right: 1px solid #2b3444;
+            border-bottom: 1px solid #2b3444;
+            padding: 6px 8px;
+        }
+        QSlider::groove:horizontal {
+            height: 5px;
+            background: #2b3444;
+            border-radius: 2px;
+        }
+        QSlider::sub-page:horizontal {
+            background: #536fe8;
+            border-radius: 2px;
+        }
+        QSlider::handle:horizontal {
+            width: 14px;
+            height: 14px;
+            margin: -5px 0;
+            border-radius: 7px;
+            background: #7f97f5;
+            border: 1px solid #9db1f8;
+        }
+        QSlider::handle:horizontal:hover { background: #93a8f7; }
+        QScrollBar:vertical { background: #10151d; width: 12px; }
+        QScrollBar::handle:vertical {
+            background: #3a465a;
+            border-radius: 5px;
+            min-height: 30px;
+            margin: 2px;
+        }
+        QScrollBar::add-line:vertical, QScrollBar::sub-line:vertical { height: 0; }
+        QScrollBar:horizontal { background: #10151d; height: 12px; }
+        QScrollBar::handle:horizontal {
+            background: #3a465a;
+            border-radius: 5px;
+            min-width: 30px;
+            margin: 2px;
+        }
+        QScrollBar::add-line:horizontal, QScrollBar::sub-line:horizontal { width: 0; }
+        QScrollBar::add-page, QScrollBar::sub-page { background: transparent; }
     )"));
 
     videovault::app::MainWindow window;

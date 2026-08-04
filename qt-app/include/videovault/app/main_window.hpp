@@ -107,6 +107,7 @@ private:
     QPushButton* changePasswordButton_{nullptr};
     QComboBox* viewModeCombo_{nullptr};
     QComboBox* tagFilterCombo_{nullptr};
+    QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
     QListWidget* iconList_{nullptr};
@@ -114,6 +115,7 @@ private:
     QLabel* statusCountLabel_{nullptr};
     std::int64_t tagFilterId_{-1};
     QString tagFilterName_;
+    QString searchText_;
     QTimer* autoLockTimer_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>* importWatcher_{nullptr};

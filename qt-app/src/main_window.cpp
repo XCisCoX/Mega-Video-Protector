@@ -297,6 +297,10 @@ QWidget* MainWindow::buildUnlockedPage() {
     viewModeCombo_->addItem(QStringLiteral("List"));
     tagFilterCombo_ = new QComboBox(toolbar);
     tagFilterCombo_->setMinimumWidth(150);
+    searchEdit_ = new QLineEdit(toolbar);
+    searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
+    searchEdit_->setClearButtonEnabled(true);
+    searchEdit_->setMinimumWidth(220);
     importButton_ = new QPushButton(QStringLiteral("Import video…"), toolbar);
     importButton_->setProperty("primary", true);
     changePasswordButton_ = new QPushButton(QStringLiteral("Change password…"), toolbar);
@@ -306,6 +310,7 @@ QWidget* MainWindow::buildUnlockedPage() {
 
     toolbarLayout->addWidget(viewModeCombo_);
     toolbarLayout->addWidget(tagFilterCombo_);
+    toolbarLayout->addWidget(searchEdit_);
     toolbarLayout->addStretch(1);
     toolbarLayout->addWidget(importButton_);
     toolbarLayout->addWidget(changePasswordButton_);
@@ -330,11 +335,12 @@ QWidget* MainWindow::buildUnlockedPage() {
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setViewMode(QListView::IconMode);
     iconList_->setIconSize(QSize(128, 128));
-    iconList_->setGridSize(QSize(168, 176));
+    iconList_->setGridSize(QSize(172, 192));
+    iconList_->setSpacing(8);
     iconList_->setWordWrap(true);
     iconList_->setResizeMode(QListView::Adjust);
     iconList_->setMovement(QListView::Static);
-    iconList_->setUniformItemSizes(true);
+    iconList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     iconList_->setSelectionMode(QAbstractItemView::SingleSelection);
 
     galleryStack_ = new QStackedWidget(page);
@@ -370,6 +376,10 @@ QWidget* MainWindow::buildUnlockedPage() {
             tagFilterName_ = tagFilterCombo_->currentData(Qt::UserRole + 1).toString();
             refreshGallery();
         });
+    connect(searchEdit_, &QLineEdit::textChanged, this, [this](const QString& text) {
+        searchText_ = text.trimmed();
+        refreshGallery();
+    });
     connect(detailsTree_, &QTreeWidget::itemDoubleClicked,
         this, [this](QTreeWidgetItem* item, int) {
             beginPlayback(item->data(0, Qt::UserRole).toLongLong());
@@ -404,7 +414,7 @@ void MainWindow::setViewMode(const int index) {
     case 1: // Large icons
         iconList_->setViewMode(QListView::IconMode);
         iconList_->setIconSize(QSize(128, 128));
-        iconList_->setGridSize(QSize(168, 176));
+        iconList_->setGridSize(QSize(172, 192));
         galleryStack_->setCurrentWidget(iconList_);
         break;
     default: // List
@@ -413,6 +423,10 @@ void MainWindow::setViewMode(const int index) {
         galleryStack_->setCurrentWidget(iconList_);
         break;
     }
+    // Relayout from the top so icons never start half-clipped after a mode
+    // switch (Qt IconMode keeps the old scroll offset and item layout).
+    iconList_->scrollToTop();
+    iconList_->doItemsLayout();
     QSettings settings;
     settings.setValue(QStringLiteral("gallery/viewMode"), index);
 }
@@ -809,17 +823,33 @@ void MainWindow::refreshGallery() {
         std::vector<core::VideoInfo> visible;
         visible.reserve(videos.size());
         for (const auto& video : videos) {
-            if (!tagFilterName_.isEmpty()) {
-                bool matches = false;
+            bool tag_matches = tagFilterName_.isEmpty();
+            if (!tag_matches) {
                 for (const auto& tag : video.tags) {
                     if (QString::fromStdString(tag).compare(tagFilterName_, Qt::CaseInsensitive) == 0) {
-                        matches = true;
+                        tag_matches = true;
                         break;
                     }
                 }
-                if (!matches) {
-                    continue;
+            }
+            if (!tag_matches) {
+                continue;
+            }
+            bool search_matches = searchText_.isEmpty();
+            if (!search_matches) {
+                for (const auto& tag : video.tags) {
+                    if (QString::fromStdString(tag).contains(searchText_, Qt::CaseInsensitive)) {
+                        search_matches = true;
+                        break;
+                    }
                 }
+                if (!search_matches && QString::fromStdString(video.display_name)
+                        .contains(searchText_, Qt::CaseInsensitive)) {
+                    search_matches = true;
+                }
+            }
+            if (!search_matches) {
+                continue;
             }
             visible.push_back(video);
         }
@@ -902,8 +932,10 @@ void MainWindow::refreshGallery() {
                     vault->media_info(video_id));
             }));
         }
-        if (videos.empty() && tagFilterName_.isEmpty()) {
+        if (videos.empty() && tagFilterName_.isEmpty() && searchText_.isEmpty()) {
             setError(galleryStatus_, QStringLiteral("No videos imported yet."));
+        } else if (visible.empty()) {
+            setError(galleryStatus_, QStringLiteral("No videos match the current search or filter."));
         }
         statusCountLabel_->setText(QStringLiteral("%1 videos · %2 MB")
             .arg(visible.size())
@@ -1152,6 +1184,8 @@ void MainWindow::showUnlocked() {
     resetAutoLock();
     tagFilterId_ = -1;
     tagFilterName_.clear();
+    searchText_.clear();
+    searchEdit_->clear();
     refreshTagFilter();
     refreshGallery();
 }
@@ -1170,6 +1204,7 @@ void MainWindow::lockVault() {
     iconList_->clear();
     tagFilterId_ = -1;
     tagFilterName_.clear();
+    searchText_.clear();
     showLogin(root);
 }
 
