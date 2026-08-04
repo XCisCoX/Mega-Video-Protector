@@ -18,12 +18,16 @@ on:
 permissions:
   contents: write
 
+# Node-runtime note: all actions here run on Node 24 (checkout@v5; the
+# floating @v4/@v2 tags track their maintainers' Node 24 releases). No
+# Node 20-only actions are used, so the fall-2026 Node 20 removal on runners
+# cannot break this workflow.
 jobs:
   build:
     runs-on: windows-latest
     timeout-minutes: 90
     steps:
-      - uses: actions/checkout@v4
+      - uses: actions/checkout@v5
 
       - name: Install Qt 5.12.12 (msvc2017_64)
         uses: jurplel/install-qt-action@v4
@@ -31,11 +35,6 @@ jobs:
           version: '5.12.12'
           arch: 'win64_msvc2017_64'
           cache: true
-
-      - name: Set up MSVC x64 dev environment
-        uses: ilammy/msvc-dev-cmd@v1
-        with:
-          arch: x64
 
       # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
       # vcpkg copies may not resolve. A FULL clone is required: a shallow
@@ -59,6 +58,7 @@ jobs:
 
       # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
       # DLL export tables (same step as local builds; paths come from env).
+      # MSVC is located by the script itself via vswhere (no dev-cmd step).
       - name: Regenerate FFmpeg import libraries
         shell: bash
         env:

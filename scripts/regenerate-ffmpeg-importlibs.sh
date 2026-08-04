@@ -15,17 +15,25 @@
 # will be C++-mangled and cannot match the DLLs' undecorated exports.
 set -u
 # Local defaults; CI overrides via environment (see .github/workflows/release.yml).
-# When the MSVC dev environment is active (msvc-dev-cmd on CI), the
-# VCToolsInstallDir environment variable takes precedence over MVP_MSVC_TOOLS.
+# MSVC is located dynamically: VCToolsInstallDir (set by msvc-dev-cmd on CI)
+# wins, otherwise vswhere finds the newest VS installation with VC tools and
+# the toolset version directory is resolved by glob (it differs per machine).
 if [ -n "${VCToolsInstallDir:-}" ]; then
     MSVC_ROOT="${VCToolsInstallDir//\\//}"
-    DUMPBIN="$MSVC_ROOT/bin/Hostx64/x64/dumpbin.exe"
-    LIBEXE="$MSVC_ROOT/bin/Hostx64/x64/lib.exe"
 else
-    TOOLS="${MVP_MSVC_TOOLS:-/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools}"
-    DUMPBIN="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/dumpbin.exe"
-    LIBEXE="$TOOLS/VC/Tools/MSVC/14.44.35207/bin/Hostx64/x64/lib.exe"
+    VSWHERE="${MVP_VSWHERE:-/c/Program Files (x86)/Microsoft Visual Studio/Installer/vswhere.exe}"
+    VSROOT=$("$VSWHERE" -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 -property installationPath 2>/dev/null | tr -d '\r')
+    VSROOT="${VSROOT//\\//}"
+    MSVC_VERSION_DIR=$(ls -d "$VSROOT/VC/Tools/MSVC/"*/ 2>/dev/null | head -1)
+    MSVC_ROOT="${MSVC_VERSION_DIR%/}"
+    if [ -z "$MSVC_ROOT" ] || [ ! -f "$MSVC_ROOT/bin/Hostx64/x64/dumpbin.exe" ]; then
+        # Last resort: the machine's known BuildTools install.
+        TOOLS="${MVP_MSVC_TOOLS:-/c/Program Files (x86)/Microsoft Visual Studio/2022/BuildTools}"
+        MSVC_ROOT="$TOOLS/VC/Tools/MSVC/14.44.35207"
+    fi
 fi
+DUMPBIN="$MSVC_ROOT/bin/Hostx64/x64/dumpbin.exe"
+LIBEXE="$MSVC_ROOT/bin/Hostx64/x64/lib.exe"
 INSTALL="${MVP_VCPKG_INSTALLED:-C:\\Users\\cisco\\AppData\\Local\\MegaVideoProtect\\vcpkg_installed\\x64-windows}"
 DEFDIR="${MVP_FFMPEG_DEFS:-C:\\Users\\cisco\\AppData\\Local\\MegaVideoProtect\\ffmpeg-defs}"
 mkdir -p "$DEFDIR"
