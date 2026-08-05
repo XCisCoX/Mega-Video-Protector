@@ -63,12 +63,24 @@ jobs:
 
       - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
         shell: pwsh
+        env:
+          # Speed: two independent wins.
+          # 1) The x64-windows-release overlay triplet (third_party/
+          #    vcpkg-overlays/triplets) builds only the Release configuration
+          #    — without it vcpkg builds every port twice and ffmpeg alone
+          #    spent ~19 min per configuration.
+          # 2) VCPKG_BINARY_SOURCES=x-gha caches built ports in the GitHub
+          #    Actions cache service (the runner provides ACTIONS_CACHE_URL /
+          #    ACTIONS_RUNTIME_TOKEN automatically), so later runs restore
+          #    ffmpeg/openssl/etc. from cache instead of recompiling.
+          VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
         run: |
           # --vcpkg-root overrides the runner's VS-installed VCPKG_ROOT env
           # (otherwise vcpkg detects the temp root and warns about the mismatch).
           & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
             --vcpkg-root="$env:RUNNER_TEMP\vcpkg" `
-            --triplet x64-windows `
+            --triplet x64-windows-release `
+            --overlay-triplets="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
             --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
 
       # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
@@ -77,7 +89,7 @@ jobs:
       - name: Regenerate FFmpeg import libraries
         shell: bash
         env:
-          MVP_VCPKG_INSTALLED: ${{ runner.temp }}\vcpkg_installed\x64-windows
+          MVP_VCPKG_INSTALLED: ${{ runner.temp }}\vcpkg_installed\x64-windows-release
           MVP_FFMPEG_DEFS: ${{ runner.temp }}\ffmpeg-defs
         run: bash scripts/regenerate-ffmpeg-importlibs.sh
 
@@ -88,6 +100,8 @@ jobs:
             -DCMAKE_TOOLCHAIN_FILE="$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" `
             -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
             -DVCPKG_INSTALLED_DIR="$env:RUNNER_TEMP\vcpkg_installed" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
             -DVCPKG_INSTALL_OPTIONS="" `
             -DCMAKE_SYSTEM_VERSION=""
 
@@ -98,9 +112,12 @@ jobs:
 
       - name: Run tests (Release)
         shell: pwsh
-        env:
-          PATH: ${{ runner.temp }}\vcpkg_installed\x64-windows\bin;${{ env.QT_ROOT_DIR }}\bin;$(PATH)
         run: |
+          # Prepend the runtime DLL dirs INSIDE the step. An env-block PATH
+          # override would use $(PATH), which GitHub Actions does not expand
+          # (only ${{ }} is expanded) — PowerShell then evaluates $(PATH) to
+          # an empty string and the system PATH (and ctest with it) is lost.
+          $env:PATH = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows-release\bin;$env:QT_ROOT_DIR\bin;$env:PATH"
           ctest --test-dir out/build/vs2022-x64 -C Release --output-on-failure
 
       - name: Package application
@@ -114,7 +131,7 @@ jobs:
           # Gather Qt runtime deps (Qt5Core/Gui/Widgets/Multimedia/... + platforms/styles/ICU).
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
           # FFmpeg runtime DLLs from the vcpkg install root.
-          $ffmpegBin = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows\bin"
+          $ffmpegBin = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows-release\bin"
           foreach ($dll in @("avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
             if (-not (Test-Path "$ffmpegBin\$dll")) { throw "Missing FFmpeg DLL: $dll" }
             Copy-Item "$ffmpegBin\$dll" $staging
