@@ -46,6 +46,21 @@
         "MVP_BUILD_APP": "ON",
         "MVP_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "android-arm64",
+      "displayName": "Android arm64-v8a core cross-build (NDK)",
+      "generator": "Ninja",
+      "binaryDir": "${sourceDir}/out/build/android-arm64",
+      "cacheVariables": {
+        "CMAKE_TOOLCHAIN_FILE": "$env{ANDROID_NDK_ROOT}/build/cmake/android.toolchain.cmake",
+        "ANDROID_ABI": "arm64-v8a",
+        "ANDROID_PLATFORM": "26",
+        "ANDROID_STL": "c++_static",
+        "CMAKE_BUILD_TYPE": "Release",
+        "MVP_BUILD_APP": "OFF",
+        "MVP_BUILD_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [

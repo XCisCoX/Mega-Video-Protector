@@ -54,6 +54,8 @@ target_link_libraries(VideoVaultCoreMediaTests PRIVATE VideoVault::Core)
 target_link_libraries(VideoVaultCoreMediaTests PRIVATE ${MVP_FFMPEG_LIBS})
 if(WIN32)
     target_include_directories(VideoVaultCoreMediaTests PRIVATE "${MVP_VCPKG_PREFIX}/include")
+elseif(ANDROID)
+    target_include_directories(VideoVaultCoreMediaTests PRIVATE ${MVP_DEP_INCLUDE_DIRS})
 endif()
 target_compile_features(VideoVaultCoreMediaTests PRIVATE cxx_std_20)
 set_target_properties(VideoVaultCoreMediaTests PROPERTIES FOLDER "Tests")
@@ -64,7 +66,11 @@ add_test(NAME VideoVaultCore.Media COMMAND VideoVaultCoreMediaTests)
 
 # The playback test target is defined in qt-app/ (it needs Qt + FFmpeg), but
 # ctest registration must happen after enable_testing() at the top level.
-add_test(NAME VideoVault.Playback COMMAND $<TARGET_FILE:VideoVaultPlaybackTests>)
+# On Android the Qt app is not part of the core cross-build, so the target
+# does not exist there.
+if(TARGET VideoVaultPlaybackTests)
+    add_test(NAME VideoVault.Playback COMMAND $<TARGET_FILE:VideoVaultPlaybackTests>)
+endif()
 
 add_executable(VideoVaultCoreTagTests
     tags.cpp

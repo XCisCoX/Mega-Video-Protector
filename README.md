@@ -19,9 +19,6 @@
 </div>
 
 ---
-
-![Mega Video Protect banner](docs/MVP-logo-banner.png)
-
 <div align="center">
 
 [![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-informational?style=flat-square)]() &nbsp;

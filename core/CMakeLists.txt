@@ -3,6 +3,9 @@
 #            config targets and literal .lib paths under MVP_VCPKG_PREFIX.
 #   Linux:   distro packages (qtbase5-dev, libavcodec-dev, libsqlcipher-dev,
 #            libargon2-dev, libsodium-dev, ...) discovered via pkg-config.
+#   Android: NDK cross-build; the dependencies are compiled by
+#            scripts/android/build-android-core.sh into MVP_ANDROID_PREFIX
+#            (static libs: argon2, libsodium, sqlcipher+openssl, ffmpeg).
 if(WIN32)
     find_package(unofficial-argon2 CONFIG REQUIRED)
     find_package(sqlcipher CONFIG REQUIRED)
@@ -29,6 +32,21 @@ if(WIN32)
         "${MVP_VCPKG_PREFIX}/lib/swscale.lib"
         "${MVP_VCPKG_PREFIX}/lib/swresample.lib"
     )
+elseif(ANDROID)
+    set(MVP_ANDROID_PREFIX
+        "${CMAKE_SOURCE_DIR}/out/android-arm64/prefix" CACHE PATH
+        "Android dependency install prefix (built by scripts/android/build-android-core.sh)")
+    set(MVP_SODIUM_LIBS "${MVP_ANDROID_PREFIX}/lib/libsodium.a")
+    set(MVP_ARGON2_LIBS "${MVP_ANDROID_PREFIX}/lib/libargon2.a")
+    set(MVP_SQLCIPHER_LIBS "${MVP_ANDROID_PREFIX}/lib/libsqlcipher.a")
+    set(MVP_FFMPEG_LIBS
+        "${MVP_ANDROID_PREFIX}/lib/libavformat.a"
+        "${MVP_ANDROID_PREFIX}/lib/libavcodec.a"
+        "${MVP_ANDROID_PREFIX}/lib/libavutil.a"
+        "${MVP_ANDROID_PREFIX}/lib/libswscale.a"
+        "${MVP_ANDROID_PREFIX}/lib/libswresample.a"
+    )
+    set(MVP_DEP_INCLUDE_DIRS "${MVP_ANDROID_PREFIX}/include")
 else()
     find_package(PkgConfig REQUIRED)
     pkg_check_modules(SQLCIPHER REQUIRED IMPORTED_TARGET sqlcipher)
@@ -62,6 +80,9 @@ target_include_directories(VideoVaultCore
     PRIVATE
         ${CMAKE_CURRENT_SOURCE_DIR}/src
 )
+if(ANDROID)
+    target_include_directories(VideoVaultCore PRIVATE ${MVP_DEP_INCLUDE_DIRS})
+endif()
 
 target_link_libraries(VideoVaultCore
     PRIVATE
