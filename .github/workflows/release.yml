@@ -124,18 +124,24 @@ jobs:
       - name: Package application
         shell: pwsh
         run: |
-          $exe = "out/build/vs2022-x64/qt-app/Release/MegaVideoProtect.exe"
+          $exeDir = "out/build/vs2022-x64/qt-app/Release"
+          $exe = "$exeDir\MegaVideoProtect.exe"
           if (-not (Test-Path $exe)) { throw "Release exe not found: $exe" }
           $staging = "$env:RUNNER_TEMP\package"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
           Copy-Item $exe $staging
-          # Gather Qt runtime deps (Qt5Core/Gui/Widgets/Multimedia/... + platforms/styles/ICU).
+          # Ship EVERY runtime DLL the linker resolved (staged next to the exe
+          # by the POST_BUILD TARGET_RUNTIME_DLLS copy): Qt, argon2, libsodium,
+          # sqlcipher, libcrypto (OpenSSL), and FFmpeg. The previous hand-
+          # picked list forgot argon2/libsodium/sqlcipher, which made the zip
+          # fail on clean machines.
+          Get-ChildItem "$exeDir\*.dll" | Copy-Item -Destination $staging
+          # Gather Qt platform plugins, styles, ICU, etc.
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
-          # FFmpeg runtime DLLs from the vcpkg install root.
-          $ffmpegBin = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows-release\bin"
-          foreach ($dll in @("avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
-            if (-not (Test-Path "$ffmpegBin\$dll")) { throw "Missing FFmpeg DLL: $dll" }
-            Copy-Item "$ffmpegBin\$dll" $staging
+          # Defensive: the crypto stack and the five FFmpeg DLLs must be in the
+          # package (throw with a clear message if any are missing).
+          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
+            if (-not (Test-Path "$staging\$dll")) { throw "Missing runtime DLL in package: $dll" }
           }
           Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVideoProtect-windows-x64.zip" -Force
           Write-Output "Packaged:"
