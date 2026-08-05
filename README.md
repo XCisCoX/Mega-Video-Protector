@@ -1,5 +1,9 @@
 # Mega Video Protect
 
+<p align="center">
+  <img src="docs/MVP-logo-banner.png" alt="Mega Video Protect banner">
+</p>
+
 **Your private video vault — encrypted on your machine, playable without ever decrypting to disk.**
 
 Mega Video Protect is a desktop video organizer that treats privacy as the default. Every video you import is split into authenticated, encrypted packages stored inside a vault locked by a password you choose; nothing leaves your computer. The app plays back your videos **in memory** through a streaming, tamper-checked reader — the plaintext never touches your disk.
