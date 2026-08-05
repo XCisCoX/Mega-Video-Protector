@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QIcon>
 #include <QString>
 
 int main(int argc, char* argv[]) {
@@ -16,6 +17,9 @@ int main(int argc, char* argv[]) {
     const auto version = videovault::core::version();
     application.setApplicationVersion(QString::fromLatin1(
         version.data(), static_cast<int>(version.size())));
+    // Window/taskbar icon on every platform (the .ico resource handles the
+    // Explorer icon for the Windows exe itself).
+    application.setWindowIcon(QIcon(QStringLiteral(":/icons/app.png")));
     application.setPalette(videovault::app::darkPalette());
     application.setStyleSheet(videovault::app::appStyleSheet());
 

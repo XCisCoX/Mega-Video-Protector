@@ -9,6 +9,12 @@ find_package(Qt5 5.12 REQUIRED COMPONENTS
     MultimediaWidgets
 )
 
+# The Windows resource compiler language is only needed for app.rc
+# (the exe icon); harmless to enable on MSVC, required for MinGW.
+if(WIN32)
+    enable_language(RC)
+endif()
+
 add_executable(VideoVaultApp WIN32
     src/main.cpp
     src/main_window.cpp
@@ -21,7 +27,14 @@ add_executable(VideoVaultApp WIN32
     include/videovault/app/player_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
+    resources/resources.qrc
 )
+
+if(WIN32)
+    # Embeds the application icon into MegaVideoProtect.exe (Explorer,
+    # taskbar, and the Alt-Tab icon all come from this resource).
+    target_sources(VideoVaultApp PRIVATE resources/app.rc)
+endif()
 
 target_include_directories(VideoVaultApp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
@@ -47,6 +60,7 @@ set_target_properties(VideoVaultApp PROPERTIES
     OUTPUT_NAME "MegaVideoProtect"
     FOLDER "Application"
     AUTOMOC ON
+    AUTORCC ON
 )
 if(MSVC)
     set_target_properties(VideoVaultApp PROPERTIES
