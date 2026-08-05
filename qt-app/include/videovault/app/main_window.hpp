@@ -5,11 +5,15 @@
 #include <cstdint>
 #include <filesystem>
 #include <memory>
+#include <vector>
 
 class QComboBox;
+class QDragEnterEvent;
+class QDropEvent;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QProgressBar;
 class QPushButton;
 class QStackedWidget;
 class QTimer;
@@ -41,6 +45,11 @@ struct TagEditorData {
     std::vector<core::TagInfo> video_tags;
 };
 
+// Shared state for a batch operation (import/restore) running on the thread
+// pool: per-item progress, the success count, and the first error if any.
+// Lives in the .cpp; MainWindow methods take it by shared_ptr.
+struct ImportProgress;
+
 class MainWindow final : public QMainWindow {
 public:
     explicit MainWindow(QWidget* parent = nullptr);
@@ -48,6 +57,8 @@ public:
 
 protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
+    void dragEnterEvent(QDragEnterEvent* event) override;
+    void dropEvent(QDropEvent* event) override;
 
 private:
     void buildInterface();
@@ -61,16 +72,22 @@ private:
     void beginOpen();
     void finishOperation();
     void beginImport();
-    void finishImport();
+    void beginImportFolder();
+    void beginImportMany(std::vector<std::filesystem::path> sources);
+    void finishImport(std::shared_ptr<ImportProgress> progress);
     void refreshGallery();
     void beginRemoveSelected(std::int64_t video_id = -1);
     void finishRemoveSelected();
     void beginChangePassword();
     void finishChangePassword();
+    void openSettings();
+    void beginRestoreSelected();
+    void finishRestoreSelected(std::shared_ptr<ImportProgress> progress);
     void beginGenerateThumbnail(std::int64_t video_id = -1);
     void finishGenerateThumbnail();
     void beginPlayback(std::int64_t video_id);
     std::int64_t selectedVideoId() const;
+    std::vector<std::int64_t> selectedVideoIds() const;
     void setViewMode(int index);
     void refreshTagFilter();
     void beginEditTags(std::int64_t video_id);
@@ -104,13 +121,15 @@ private:
     QLabel* unlockedLocation_{nullptr};
     QLabel* galleryStatus_{nullptr};
     QPushButton* importButton_{nullptr};
-    QPushButton* changePasswordButton_{nullptr};
+    QPushButton* importFolderButton_{nullptr};
+    QPushButton* settingsButton_{nullptr};
     QComboBox* viewModeCombo_{nullptr};
     QComboBox* tagFilterCombo_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};
     QTreeWidget* detailsTree_{nullptr};
     QListWidget* iconList_{nullptr};
+    QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     QLabel* statusCountLabel_{nullptr};
     std::int64_t tagFilterId_{-1};
@@ -118,8 +137,9 @@ private:
     QString searchText_;
     QTimer* autoLockTimer_{nullptr};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
-    QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>* importWatcher_{nullptr};
+    QFutureWatcher<void>* importWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<bool>>>* adminWatcher_{nullptr};
+    QFutureWatcher<void>* restoreWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>* thumbnailWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.

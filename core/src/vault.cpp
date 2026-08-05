@@ -820,6 +820,19 @@ Result<std::int64_t> Vault::add_tag(
     return tag_id.value();
 }
 
+Result<std::int64_t> Vault::create_tag(const std::string_view tag_name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto normalized = normalize_tag_name(tag_name);
+    if (normalized.empty()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "tag names must be non-empty, trimmed, at most 64 bytes, with no control characters"};
+    }
+    return impl_->database_.ensure_tag(normalized);
+}
+
 Result<bool> Vault::remove_tag(
     const std::int64_t video_id,
     const std::int64_t tag_id) {
@@ -871,6 +884,95 @@ Result<std::vector<TagInfo>> Vault::list_tags() const {
         result.push_back(std::move(info));
     }
     return result;
+}
+
+Result<std::int64_t> Vault::rename_tag(
+    const std::int64_t tag_id,
+    const std::string_view new_name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto normalized = normalize_tag_name(new_name);
+    if (normalized.empty()) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "tag names must be non-empty, trimmed, at most 64 bytes, with no control characters"};
+    }
+    return impl_->database_.rename_tag(tag_id, normalized);
+}
+
+Result<bool> Vault::delete_tag(const std::int64_t tag_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.delete_tag(tag_id);
+}
+
+Result<std::filesystem::path> Vault::restore_video(
+    const std::int64_t video_id,
+    const std::filesystem::path& target_dir) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    if (!std::filesystem::is_directory(target_dir)) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "the restore target must be an existing directory"};
+    }
+    auto row_result = impl_->database_.query_video(video_id);
+    if (!row_result) {
+        return row_result.error();
+    }
+    if (row_result.value().display_name.empty()) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown video"};
+    }
+    const auto target = target_dir / row_result.value().display_name;
+    auto reader = open_package_reader(
+        root_, impl_->database_, impl_->master_key_, video_id);
+    if (!reader) {
+        return reader.error();
+    }
+    std::ofstream out(target, std::ios::binary | std::ios::trunc);
+    if (!out) {
+        return VaultError{VaultErrorCode::PermissionDenied,
+            "cannot create the restore file"};
+    }
+    constexpr std::uint64_t kChunkBytes = 1U << 20;
+    std::uint64_t offset = 0U;
+    while (offset < row_result.value().original_size) {
+        auto sought = reader.value().seek(offset);
+        if (!sought) {
+            return sought.error();
+        }
+        const auto want = static_cast<std::size_t>(std::min<std::uint64_t>(
+            kChunkBytes, row_result.value().original_size - offset));
+        std::vector<unsigned char> chunk(want);
+        auto got = reader.value().read(chunk);
+        if (!got) {
+            return got.error();
+        }
+        if (got.value() == 0U) {
+            break; // Defensive: EOF before the expected size.
+        }
+        out.write(reinterpret_cast<const char*>(chunk.data()),
+            static_cast<std::streamsize>(got.value()));
+        if (!out) {
+            std::error_code ignored;
+            std::filesystem::remove(target, ignored);
+            return VaultError{VaultErrorCode::PermissionDenied,
+                "failed while writing the restore file"};
+        }
+        offset += got.value();
+    }
+    out.close();
+    if (!out) {
+        std::error_code ignored;
+        std::filesystem::remove(target, ignored);
+        return VaultError{VaultErrorCode::PermissionDenied,
+            "failed while finalizing the restore file"};
+    }
+    return target;
 }
 
 Result<bool> Vault::remove_video(const std::int64_t video_id) {

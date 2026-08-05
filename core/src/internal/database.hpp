@@ -121,6 +121,14 @@ public:
 
     [[nodiscard]] Result<bool> untag_video(std::int64_t video_id, std::int64_t tag_id);
 
+    // Renames a tag (case-insensitively unique). Fails with InvalidArgument
+    // when the tag is unknown or the destination name collides.
+    [[nodiscard]] Result<std::int64_t> rename_tag(
+        std::int64_t tag_id, const std::string& new_name);
+
+    // Deletes a tag entirely; video_tags rows cascade.
+    [[nodiscard]] Result<bool> delete_tag(std::int64_t tag_id);
+
     [[nodiscard]] Result<std::vector<TagRow>> tags_for_video(std::int64_t video_id) const;
 
     [[nodiscard]] Result<std::vector<TagRow>> list_tags() const;

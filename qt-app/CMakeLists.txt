@@ -11,9 +11,11 @@ add_executable(VideoVaultApp WIN32
     src/main_window.cpp
     src/media_decoder.cpp
     src/player_window.cpp
+    src/settings_dialog.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
+    include/videovault/app/settings_dialog.hpp
 )
 
 target_include_directories(VideoVaultApp PRIVATE
@@ -57,13 +59,20 @@ if(MVP_BUILD_TESTS)
     add_executable(VideoVaultPlaybackTests
         tests/playback.cpp
         src/media_decoder.cpp
+        src/player_window.cpp
         include/videovault/app/media_decoder.hpp
+        include/videovault/app/player_window.hpp
+    )
+    set_target_properties(VideoVaultPlaybackTests PROPERTIES
+        AUTOMOC ON
     )
     target_link_libraries(VideoVaultPlaybackTests
         PRIVATE
             VideoVault::Core
             Qt5::Core
             Qt5::Gui
+            Qt5::Widgets
+            Qt5::Multimedia
             "${MVP_VCPKG_PREFIX}/lib/avformat.lib"
             "${MVP_VCPKG_PREFIX}/lib/avcodec.lib"
             "${MVP_VCPKG_PREFIX}/lib/avutil.lib"

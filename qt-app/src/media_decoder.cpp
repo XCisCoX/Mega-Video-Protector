@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixfmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
@@ -302,7 +303,11 @@ public:
             return false;
         }
 
-        // The package plaintext size for the AVIO size callback.
+        // The package plaintext size for the AVIO size callback. The encrypted
+        // .vvp file is LARGER than the plaintext (header + per-chunk AEAD
+        // overhead); using it would skew SEEK_END/AVSEEK_SIZE and the stream
+        // cache's EOF clamping. The original imported size is the plaintext
+        // byte count.
         auto package = vault->package_path(video_id);
         if (!package) {
             if (error != nullptr) {
@@ -319,6 +324,16 @@ public:
             }
             return false;
         }
+        std::uint64_t plaintext_size = package_size;
+        auto videos = vault->list_videos();
+        if (videos) {
+            for (const auto& video : videos.value()) {
+                if (video.id == video_id) {
+                    plaintext_size = video.original_size;
+                    break;
+                }
+            }
+        }
 
         auto* io_buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
         if (io_buffer == nullptr) {
@@ -329,7 +344,7 @@ public:
         }
         handle_ = std::make_unique<FormatHandle>(
             FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});
-        handle_->source.set_plaintext_size(package_size);
+        handle_->source.set_plaintext_size(plaintext_size);
 
         AVIOContext* raw_io = avio_alloc_context(
             io_buffer, static_cast<int>(kAvioBufferSize), 0, &handle_->source,
@@ -473,14 +488,21 @@ public:
     bool is_open() const { return handle_ != nullptr && handle_->format != nullptr; }
 
     bool seek_to(const std::int64_t ms) {
-        if (!is_open()) {
+        if (!is_open() || video_stream_ < 0) {
+            last_seek_status_ = AVERROR(EINVAL);
             return false;
         }
         const auto target_ts = av_rescale_q(
             ms, AVRational{1, 1000}, handle_->format->streams[video_stream_]->time_base);
-        const int status = avformat_seek_file(
-            handle_->format.get(), video_stream_, INT64_MIN, target_ts, target_ts, 0);
-        if (status < 0) {
+        // Backward seek lands on the keyframe at/before the target — the
+        // classic, most compatible API; fall back to the range form.
+        last_seek_status_ = av_seek_frame(
+            handle_->format.get(), video_stream_, target_ts, AVSEEK_FLAG_BACKWARD);
+        if (last_seek_status_ < 0) {
+            last_seek_status_ = avformat_seek_file(
+                handle_->format.get(), video_stream_, INT64_MIN, target_ts, target_ts, 0);
+        }
+        if (last_seek_status_ < 0) {
             return false;
         }
         if (video_codec_) {
@@ -492,6 +514,8 @@ public:
         audio_samples_.clear();
         return true;
     }
+
+    int last_seek_status_{0};
 
     bool decode_next_video_frame(DecodedFrame* frame) {
         if (!is_open()) {
@@ -689,7 +713,13 @@ int MediaDecoder::video_height() const { return impl_->video_height(); }
 bool MediaDecoder::has_audio() const { return impl_->has_audio(); }
 int MediaDecoder::audio_sample_rate() const { return impl_->audio_sample_rate(); }
 int MediaDecoder::audio_channels() const { return impl_->audio_channels(); }
-bool MediaDecoder::seek_to(const std::int64_t ms) { return impl_->seek_to(ms); }
+int MediaDecoder::seek_to(const std::int64_t ms) {
+    if (impl_ == nullptr) {
+        return AVERROR(EINVAL);
+    }
+    impl_->seek_to(ms);
+    return impl_->last_seek_status_;
+}
 bool MediaDecoder::decode_next_video_frame(DecodedFrame* frame) {
     return impl_->decode_next_video_frame(frame);
 }

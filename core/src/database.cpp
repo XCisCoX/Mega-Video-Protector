@@ -1034,6 +1034,54 @@ Result<bool> Database::untag_video(
     return true;
 }
 
+Result<std::int64_t> Database::rename_tag(
+    const std::int64_t tag_id,
+    const std::string& new_name) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    // The UNIQUE COLLATE NOCASE constraint on tags.name rejects collisions;
+    // translate that into a clean InvalidArgument.
+    Statement update(database_, "UPDATE tags SET name = ?1 WHERE id = ?2;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 1, new_name.c_str(),
+               static_cast<int>(new_name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 2, tag_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "rename tag", sqlite3_extended_errcode(database_));
+    }
+    const int step_status = sqlite3_step(update.get());
+    if (step_status == SQLITE_CONSTRAINT || step_status == SQLITE_CONSTRAINT_UNIQUE) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "another tag already has this name"};
+    }
+    if (step_status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "rename tag", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown tag"};
+    }
+    return tag_id;
+}
+
+Result<bool> Database::delete_tag(const std::int64_t tag_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement remove(database_, "DELETE FROM tags WHERE id = ?1;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, tag_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "delete tag", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown tag"};
+    }
+    return true;
+}
+
 Result<std::vector<TagRow>> Database::tags_for_video(
     const std::int64_t video_id) const {
     if (database_ == nullptr) {

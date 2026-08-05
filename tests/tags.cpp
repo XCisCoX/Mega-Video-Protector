@@ -219,6 +219,67 @@ int main() {
         }
     }
 
+    // Renaming a tag keeps its id and updates every video's view of it.
+    {
+        const auto tags = created.value().list_tags();
+        const auto vacation_id = findTag(tags.value(), "Vacation");
+        if (vacation_id < 0) {
+            return fail("Vacation must exist before renaming.");
+        }
+        const auto renamed = created.value().rename_tag(vacation_id, "Holidays");
+        if (!renamed || renamed.value() != vacation_id) {
+            return fail("Renaming must keep the tag id.");
+        }
+        const auto after = created.value().tags_for_video(first_id.value());
+        if (!after || after.value().size() != 1U
+            || after.value()[0].name != "Holidays") {
+            return fail("Renaming must update the video's tag name.");
+        }
+        if (created.value().rename_tag(vacation_id, "Family")) {
+            return fail("Renaming onto an existing name must fail.");
+        }
+        if (created.value().rename_tag(999999, "Anything")) {
+            return fail("Renaming an unknown tag must fail.");
+        }
+        if (created.value().rename_tag(vacation_id, "   ")) {
+            return fail("Renaming to a blank name must fail.");
+        }
+    }
+
+    // Deleting a tag detaches it from every video; the name can be reused.
+    {
+        const auto tags = created.value().list_tags();
+        const auto holidays_id = findTag(tags.value(), "Holidays");
+        if (holidays_id < 0) {
+            return fail("Holidays must exist before deletion.");
+        }
+        const auto deleted = created.value().delete_tag(holidays_id);
+        if (!deleted || !deleted.value()) {
+            return fail("Deleting a tag must succeed.");
+        }
+        const auto after = created.value().tags_for_video(first_id.value());
+        if (!after || !after.value().empty()) {
+            return fail("Deleting a tag must detach it from videos.");
+        }
+        if (created.value().delete_tag(holidays_id)) {
+            return fail("Deleting an unknown tag must fail.");
+        }
+        const auto recreated = created.value().add_tag(first_id.value(), "Holidays");
+        if (!recreated || recreated.value() == holidays_id) {
+            return fail("Recreating a deleted tag must get a fresh id.");
+        }
+        const auto recreated_list = created.value().list_tags();
+        const auto recreated_id = findTag(recreated_list.value(), "Holidays");
+        if (recreated_id < 0) {
+            return fail("The recreated tag must appear in the global list.");
+        }
+        for (const auto& tag : recreated_list.value()) {
+            if (tag.id == recreated_id && tag.video_count != 1) {
+                return fail("The recreated tag must be counted on the video.");
+            }
+        }
+    }
+
     // Tags persist across reopen, and locked vaults reject tag operations.
     {
         created.value().lock();
@@ -228,7 +289,7 @@ int main() {
         }
         const auto tags = reopened.value().tags_for_video(first_id.value());
         if (!tags || tags.value().size() != 1U
-            || tags.value()[0].name != "Vacation") {
+            || tags.value()[0].name != "Holidays") {
             return fail("Tags must survive a reopen.");
         }
         const auto locked_add = created.value().add_tag(first_id.value(), "Blocked");
@@ -236,6 +297,35 @@ int main() {
             return fail("Tagging on a locked vault must fail cleanly.");
         }
         reopened.value().lock();
+    }
+
+    // Creating a standalone tag (no video attached) works and deduplicates.
+    {
+        auto reopened = Vault::open(root, "tag test password");
+        if (!reopened) {
+            return fail("The vault must reopen for the standalone-tag check.");
+        }
+        const auto solo = reopened.value().create_tag("Solo");
+        if (!solo || solo.value() <= 0) {
+            return fail("Creating a standalone tag must return its id.");
+        }
+        const auto solo_again = reopened.value().create_tag("solo");
+        if (!solo_again || solo_again.value() != solo.value()) {
+            return fail("Recreating a standalone tag must reuse the id.");
+        }
+        const auto solo_list = reopened.value().list_tags();
+        const auto solo_id = findTag(solo_list.value(), "Solo");
+        if (solo_id < 0) {
+            return fail("The standalone tag must appear in the global list.");
+        }
+        for (const auto& tag : solo_list.value()) {
+            if (tag.id == solo_id && tag.video_count != 0) {
+                return fail("A standalone tag must be counted on zero videos.");
+            }
+        }
+        if (reopened.value().create_tag("  ")) {
+            return fail("Creating a blank standalone tag must fail.");
+        }
     }
 
     std::cout << "Tag checks succeeded.\n";

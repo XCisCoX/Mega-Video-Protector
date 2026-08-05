@@ -52,8 +52,8 @@ private:
 
 // Video display surface: paints the latest frame directly (no QPixmap
 // conversion), aspect-fit on black, with an optional centered text overlay
-// ("Loading…" / error messages). The worker's frames are already scaled to
-// the surface size, so painting is a straight blit.
+// ("Loading…" / error messages) and a transient bottom overlay for events
+// like failed seeks. The worker's frames are already display-sized.
 class VideoSurface final : public QWidget {
     Q_OBJECT
 public:
@@ -65,13 +65,22 @@ public:
 
     void setFrame(const QImage& image) {
         frame_ = image;
-        text_.clear();
         update();
     }
 
     void setText(const QString& text) {
         text_ = text;
         frame_ = QImage();
+        update();
+    }
+
+    void setOverlay(const QString& text) {
+        overlayText_ = text;
+        update();
+    }
+
+    void clearOverlay() {
+        overlayText_.clear();
         update();
     }
 
@@ -86,10 +95,17 @@ protected:
             const QRect target(
                 QPoint((width() - fitted.width()) / 2, (height() - fitted.height()) / 2),
                 fitted);
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
             painter.drawImage(target, frame_);
+            if (!overlayText_.isEmpty()) {
+                // Transient message band at the bottom of the picture.
+                const QRect band(0, height() - 34, width(), 34);
+                painter.fillRect(band, QColor(0, 0, 0, 170));
+                painter.setPen(QColor(255, 220, 120));
+                painter.drawText(band, Qt::AlignCenter, overlayText_);
+            }
         } else if (!text_.isEmpty()) {
-            painter.setPen(QColor(210, 210, 210));
+            painter.setPen(QColor(200, 200, 200));
             painter.drawText(rect(), Qt::AlignCenter, text_);
         }
     }
@@ -97,6 +113,29 @@ protected:
 private:
     QImage frame_;
     QString text_;
+    QString overlayText_;
+};
+
+// Seek slider that jumps to the exact clicked position (instead of QSlider's
+// default "page step" nudge), then drags normally from there.
+class SeekSlider final : public QSlider {
+    Q_OBJECT
+public:
+    explicit SeekSlider(QWidget* parent = nullptr)
+        : QSlider(Qt::Horizontal, parent) {}
+
+protected:
+    void mousePressEvent(QMouseEvent* event) override {
+        if (event->button() == Qt::LeftButton && maximum() > minimum()) {
+            const double fraction = std::clamp(
+                static_cast<double>(event->pos().x())
+                    / static_cast<double>(std::max(1, width())),
+                0.0, 1.0);
+            setValue(minimum()
+                + static_cast<int>(fraction * (maximum() - minimum())));
+        }
+        QSlider::mousePressEvent(event);
+    }
 };
 
 // PotPlayer-style window with a worker-thread decode pipeline: the worker
@@ -132,6 +171,7 @@ private:
     void setVolumePercent(int percent);
     void toggleMute();
     void toggleFullscreen();
+    bool handleKey(QKeyEvent* event);
     void applyVolume();
     void showControls();
     void hideControls();
@@ -190,11 +230,17 @@ private:
     std::mutex errorMutex_;
     QString openError_;
 
+    // Seek failure (worker -> UI overlay).
+    std::mutex seekErrorMutex_;
+    QString seekErrorMessage_;
+    std::atomic<bool> seekErrorPending_{false};
+
     QTimer timer_;
     QTimer uiHideTimer_;
 
     bool fullscreen_{false};
     bool muted_{false};
+    bool clickSeekPending_{false};
     int volumePercent_{100};
     QImage lastFrame_;
 };

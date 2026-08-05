@@ -62,7 +62,8 @@ public:
     void set_display_size(int width, int height);
 
     // Seeks to a presentation time (ms). Buffered audio is discarded.
-    bool seek_to(std::int64_t ms);
+    // Returns 0 on success or a negative AVERROR code on failure.
+    [[nodiscard]] int seek_to(std::int64_t ms);
 
     // Decodes packets until the next video frame is produced (audio packets
     // append s16le PCM to the internal buffer). Returns false at EOF or on

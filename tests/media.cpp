@@ -14,6 +14,7 @@ extern "C" {
 #include <filesystem>
 #include <fstream>
 #include <iostream>
+#include <iterator>
 #include <string>
 #include <vector>
 
@@ -222,6 +223,40 @@ int main() {
             || auto_thumb.value().mime != "image/jpeg"
             || !isJpeg(auto_thumb.value().bytes)) {
             return fail("Import must auto-generate a readable thumbnail.");
+        }
+    }
+
+    // Restore decrypts a video back to plaintext, byte-identical to the
+    // original source file, using its original file name.
+    {
+        const auto restore_dir = temp.path() / L"restored";
+        std::error_code ignored;
+        std::filesystem::create_directories(restore_dir, ignored);
+        const auto restored = created.value().restore_video(video_id, restore_dir);
+        if (!restored) {
+            std::cerr << "restore_video failed: "
+                      << restored.error().technical_detail << '\n';
+            return EXIT_FAILURE;
+        }
+        if (restored.value().filename() != fixture.filename()) {
+            return fail("The restored file must keep the original file name.");
+        }
+        std::ifstream in(restored.value(), std::ios::binary);
+        std::vector<unsigned char> restored_bytes(
+            (std::istreambuf_iterator<char>(in)), std::istreambuf_iterator<char>());
+        std::ifstream original(fixture, std::ios::binary);
+        std::vector<unsigned char> original_bytes(
+            (std::istreambuf_iterator<char>(original)), std::istreambuf_iterator<char>());
+        if (restored_bytes != original_bytes) {
+            return fail("The restored file must be byte-identical to the source.");
+        }
+        // Restoring to a non-existent directory must fail cleanly.
+        const auto bad_dir = temp.path() / L"does-not-exist";
+        if (created.value().restore_video(video_id, bad_dir)) {
+            return fail("Restoring into a missing directory must fail.");
+        }
+        if (created.value().restore_video(999999, restore_dir)) {
+            return fail("Restoring an unknown video must fail.");
         }
     }
 

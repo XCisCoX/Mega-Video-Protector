@@ -201,6 +201,10 @@ public:
         std::int64_t video_id,
         std::string_view tag_name);
 
+    // Creates a tag without attaching it to any video (normalized like
+    // add_tag; reuses an existing case-insensitive match).
+    [[nodiscard]] Result<std::int64_t> create_tag(std::string_view tag_name);
+
     [[nodiscard]] Result<bool> remove_tag(
         std::int64_t video_id,
         std::int64_t tag_id);
@@ -210,6 +214,22 @@ public:
 
     // All tags with their video counts, sorted case-insensitively.
     [[nodiscard]] Result<std::vector<TagInfo>> list_tags() const;
+
+    // Renames a tag (normalized like add_tag; case-insensitively unique).
+    // Fails with InvalidArgument for an unknown tag or a name collision.
+    [[nodiscard]] Result<std::int64_t> rename_tag(
+        std::int64_t tag_id,
+        std::string_view new_name);
+
+    // Deletes a tag and detaches it from every video.
+    [[nodiscard]] Result<bool> delete_tag(std::int64_t tag_id);
+
+    // Restores a video to plaintext: streams the decrypted bytes to
+    // `target_dir / <original name>` in chunks (no whole-file buffer) and
+    // returns the written path. Overwrites an existing file of the same name.
+    [[nodiscard]] Result<std::filesystem::path> restore_video(
+        std::int64_t video_id,
+        const std::filesystem::path& target_dir);
 
 private:
     class Impl;

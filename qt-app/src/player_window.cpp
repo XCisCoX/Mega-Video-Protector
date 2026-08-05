@@ -1,10 +1,16 @@
 #include "videovault/app/player_window.hpp"
 
+extern "C" {
+#include <libavutil/error.h>
+}
+
+#include <QApplication>
 #include <QAudioFormat>
 #include <QCloseEvent>
 #include <QColor>
 #include <QComboBox>
 #include <QDateTime>
+#include <QDebug>
 #include <QElapsedTimer>
 #include <QEvent>
 #include <QHBoxLayout>
@@ -14,6 +20,7 @@
 #include <QResizeEvent>
 #include <QSettings>
 #include <QVBoxLayout>
+#include <QWheelEvent>
 
 #include <algorithm>
 #include <chrono>
@@ -85,7 +92,9 @@ PlayerWindow::PlayerWindow(
     surface_ = new VideoSurface(this);
     surface_->setMinimumSize(320, 200);
     surface_->setText(QStringLiteral("Loading…"));
-    surface_->installEventFilter(this);
+    // App-level key interception: the player's shortcuts (Space, arrows, +-,
+    // F) work regardless of which child widget holds focus.
+    qApp->installEventFilter(this);
     layout->addWidget(surface_, 1);
 
     // Controls bar (PotPlayer-style bottom bar).
@@ -98,7 +107,7 @@ PlayerWindow::PlayerWindow(
     controlsLayout->setContentsMargins(12, 6, 12, 8);
     controlsLayout->setSpacing(6);
 
-    positionSlider_ = new QSlider(Qt::Horizontal, controlsBar_);
+    positionSlider_ = new SeekSlider(controlsBar_);
     positionSlider_->setRange(0, 1);
     positionSlider_->setTracking(false);
 
@@ -203,6 +212,7 @@ PlayerWindow::PlayerWindow(
 }
 
 PlayerWindow::~PlayerWindow() {
+    qApp->removeEventFilter(this);
     timer_.stop();
     quit_.store(true);
     if (worker_.joinable()) {
@@ -229,54 +239,101 @@ void PlayerWindow::closeEvent(QCloseEvent* event) {
 }
 
 void PlayerWindow::keyPressEvent(QKeyEvent* event) {
-    switch (event->key()) {
-    case Qt::Key_Space:
-        togglePlayPause();
+    // The app-level event filter normally consumes player keys before they
+    // reach the focused widget; this path covers the dialog itself having
+    // focus (e.g. no child focused).
+    if (handleKey(event)) {
         event->accept();
         return;
-    case Qt::Key_Left:
-        seekRelative(-5000);
-        event->accept();
-        return;
-    case Qt::Key_Right:
-        seekRelative(5000);
-        event->accept();
-        return;
-    case Qt::Key_Up:
-        volumeSlider_->setValue(volumeSlider_->value() + 5);
-        event->accept();
-        return;
-    case Qt::Key_Down:
-        volumeSlider_->setValue(volumeSlider_->value() - 5);
-        event->accept();
-        return;
-    case Qt::Key_F:
-        toggleFullscreen();
-        event->accept();
-        return;
-    case Qt::Key_Escape:
-        if (fullscreen_) {
-            toggleFullscreen();
-            event->accept();
-            return;
-        }
-        break;
-    default:
-        break;
     }
     QDialog::keyPressEvent(event);
 }
 
+bool PlayerWindow::handleKey(QKeyEvent* event) {
+    switch (event->key()) {
+    case Qt::Key_Space:
+        togglePlayPause();
+        return true;
+    case Qt::Key_Left:
+        seekRelative(-5000);
+        return true;
+    case Qt::Key_Right:
+        seekRelative(5000);
+        return true;
+    case Qt::Key_Up:
+        setVolumePercent(volumePercent_ + 5);
+        return true;
+    case Qt::Key_Down:
+        setVolumePercent(volumePercent_ - 5);
+        return true;
+    case Qt::Key_F:
+        toggleFullscreen();
+        return true;
+    case Qt::Key_Escape:
+        if (fullscreen_) {
+            toggleFullscreen();
+        } else {
+            close();
+        }
+        return true;
+    default:
+        return false;
+    }
+}
+
 void PlayerWindow::mouseDoubleClickEvent(QMouseEvent* event) {
+    // A double-click means fullscreen, not two seeks.
+    clickSeekPending_ = false;
     toggleFullscreen();
     event->accept();
 }
 
 bool PlayerWindow::eventFilter(QObject* watched, QEvent* event) {
-    if (watched == surface_ && event->type() == QEvent::MouseMove) {
-        showControls();
-        if (fullscreen_) {
-            uiHideTimer_.start();
+    // The filter is installed on qApp so the player's shortcuts work no
+    // matter which child widget holds focus: the dialog's own keyPressEvent
+    // never fires while a child (slider/button) consumes keys first.
+    QObject* current = watched;
+    while (current != nullptr && current != this) {
+        current = current->parent();
+    }
+    if (current == this) {
+        if (event->type() == QEvent::KeyPress
+            && handleKey(static_cast<QKeyEvent*>(event))) {
+            return true; // consumed by the player
+        }
+        if (event->type() == QEvent::Wheel) {
+            // Mouse wheel seeks ±5 s (up = forward).
+            const auto* wheel = static_cast<QWheelEvent*>(event);
+            if (wheel->angleDelta().y() != 0) {
+                seekRelative(wheel->angleDelta().y() > 0 ? 5000 : -5000);
+                return true;
+            }
+        }
+        if (watched == surface_ && event->type() == QEvent::MouseMove) {
+            showControls();
+            if (fullscreen_) {
+                uiHideTimer_.start();
+            }
+        }
+        if (watched == surface_ && event->type() == QEvent::MouseButtonRelease) {
+            // Click on the video seeks to the clicked fraction (a delayed
+            // single-click so a double-click still toggles fullscreen).
+            const auto* mouse = static_cast<QMouseEvent*>(event);
+            if (mouse->button() == Qt::LeftButton && durationMs_.load() > 0) {
+                const double fraction = std::clamp(
+                    static_cast<double>(mouse->pos().x())
+                        / static_cast<double>(std::max(1, surface_->width())),
+                    0.0, 1.0);
+                clickSeekPending_ = true;
+                QTimer::singleShot(250, this, [this, fraction] {
+                    if (!clickSeekPending_) {
+                        return;
+                    }
+                    clickSeekPending_ = false;
+                    doSeek(static_cast<std::int64_t>(
+                        fraction * static_cast<double>(durationMs_.load())));
+                });
+            }
         }
     }
     return QDialog::eventFilter(watched, event);
@@ -314,16 +371,47 @@ void PlayerWindow::workerLoop() {
     while (!quit_.load()) {
         if (seekRequested_.exchange(false)) {
             const std::int64_t target = seekTargetMs_.load();
-            decoder_.seek_to(target);
+            const int seek_status = decoder_.seek_to(target);
+            if (seek_status < 0) {
+                char errbuf[AV_ERROR_MAX_STRING_SIZE] = {0};
+                av_strerror(seek_status, errbuf, sizeof(errbuf));
+                qWarning() << "seek to" << target << "ms failed:" << errbuf;
+                {
+                    std::lock_guard<std::mutex> guard(seekErrorMutex_);
+                    seekErrorMessage_ = QStringLiteral("Seek failed: %1")
+                        .arg(QString::fromUtf8(errbuf, -1));
+                }
+                seekErrorPending_.store(true);
+            }
             clock_base_ms = target;
             clock_start_elapsed = clock.elapsed();
-            last_pts = target;
-            DecodedFrame frame;
-            if (decoder_.decode_next_video_frame(&frame)) {
-                last_pts = frame.pts_ms;
-                publishFrame(frame.image, frame.pts_ms);
+            // The demuxer lands on the keyframe at/before the target. Decode
+            // forward and skip (without publishing) until the frame is within
+            // a quarter second of the target, then show it — otherwise sparse
+            // keyframes make the seek look like it "didn't move" (it would
+            // show a frame seconds earlier). Gap audio is discarded: the user
+            // asked to jump, not to hear the skipped part.
+            std::int64_t shown_pts = target;
+            QImage shown;
+            for (int guard = 0; guard < 120; ++guard) {
+                (void)decoder_.take_audio_samples();
+                DecodedFrame frame;
+                if (!decoder_.decode_next_video_frame(&frame)) {
+                    break;
+                }
+                if (frame.pts_ms >= target - 250) {
+                    shown = frame.image;
+                    shown_pts = frame.pts_ms;
+                    if (frame.pts_ms >= target) {
+                        break;
+                    }
+                }
             }
-            feedAudio();
+            last_pts = shown_pts;
+            playheadMs_.store(shown_pts);
+            if (!shown.isNull()) {
+                publishFrame(shown, shown_pts);
+            }
             continue;
         }
         if (rebaseRequested_.exchange(false)) {
@@ -533,6 +621,17 @@ void PlayerWindow::tick() {
         positionSlider_->setEnabled(false);
     }
 
+    // Transient overlay for a failed seek (the worker logged the reason).
+    if (seekErrorPending_.exchange(false)) {
+        QString message;
+        {
+            std::lock_guard<std::mutex> guard(seekErrorMutex_);
+            message = seekErrorMessage_;
+        }
+        surface_->setOverlay(message);
+        QTimer::singleShot(3500, this, [this] { surface_->clearOverlay(); });
+    }
+
     // Create the audio device once the worker has opened the stream.
     if (!audioSetupDone_ && audioReady_.load()) {
         audioSetupDone_ = true;
@@ -579,6 +678,10 @@ void PlayerWindow::tick() {
     const std::int64_t duration = durationMs_.load();
     if (duration > 0 && positionSlider_->maximum() != static_cast<int>(duration)) {
         positionSlider_->setRange(0, static_cast<int>(std::max<std::int64_t>(duration, 1)));
+        // Clicking the slider groove jumps by a page: ~5% of the video
+        // (minimum 2 s) so a single click actually moves the position.
+        positionSlider_->setPageStep(static_cast<int>(std::max<std::int64_t>(
+            duration / 20, 2000)));
     }
 
     const std::int64_t pts = playheadMs_.load();

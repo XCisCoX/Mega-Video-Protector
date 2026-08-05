@@ -1,8 +1,9 @@
 #include "videovault/app/main_window.hpp"
-
 #include "videovault/app/player_window.hpp"
+#include "videovault/app/settings_dialog.hpp"
 #include "videovault/core/vault.hpp"
 
+#include <QtConcurrent/QtConcurrentMap>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QApplication>
@@ -10,6 +11,8 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QDragEnterEvent>
+#include <QDropEvent>
 #include <QEvent>
 #include <QFileDialog>
 #include <QFormLayout>
@@ -18,17 +21,21 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListView>
 #include <QListWidget>
 #include <QMenu>
+#include <QMimeData>
 #include <QPixmap>
+#include <QProgressBar>
 #include <QPushButton>
 #include <QSet>
 #include <QSettings>
 #include <QStackedWidget>
 #include <QTimer>
+#include <QUrl>
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
@@ -37,6 +44,8 @@
 #include <Windows.h>
 
 #include <algorithm>
+#include <atomic>
+#include <mutex>
 #include <string>
 #include <utility>
 
@@ -112,6 +121,17 @@ core::Argon2Parameters selectedParameters(const int profile) {
 
 } // namespace
 
+// Batch-operation state shared between the thread pool and the UI: how many
+// items finished, how many succeeded, and the first error (if any).
+// Forward-declared in main_window.hpp; defined here at app scope.
+struct ImportProgress {
+    std::atomic<int> done{0};
+    std::atomic<int> succeeded{0};
+    std::atomic<bool> failed{false};
+    std::mutex error_mutex;
+    core::VaultError first_error;
+};
+
 struct VaultOperationResult {
     bool succeeded{false};
     std::unique_ptr<core::Vault> vault;
@@ -123,6 +143,7 @@ MainWindow::MainWindow(QWidget* parent)
     setWindowTitle(QStringLiteral("Mega Video Protect"));
     resize(1020, 700);
     setMinimumSize(780, 520);
+    setAcceptDrops(true); // drag & drop video import
 
     autoLockTimer_->setSingleShot(true);
     autoLockTimer_->setInterval(kAutoLockMilliseconds);
@@ -303,7 +324,12 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setMinimumWidth(220);
     importButton_ = new QPushButton(QStringLiteral("Import video…"), toolbar);
     importButton_->setProperty("primary", true);
-    changePasswordButton_ = new QPushButton(QStringLiteral("Change password…"), toolbar);
+    importFolderButton_ = new QPushButton(QStringLiteral("Import folder…"), toolbar);
+    importFolderButton_->setToolTip(QStringLiteral(
+        "Import every video file from a folder (and drop files here to import)"));
+    settingsButton_ = new QPushButton(QStringLiteral("Settings…"), toolbar);
+    settingsButton_->setToolTip(QStringLiteral(
+        "Change the password, manage tags, and adjust player settings"));
     auto* lockButton = new QPushButton(QStringLiteral("Lock"), toolbar);
     lockButton->setToolTip(QStringLiteral("Lock the vault"));
     lockButton->setFlat(true);
@@ -313,7 +339,8 @@ QWidget* MainWindow::buildUnlockedPage() {
     toolbarLayout->addWidget(searchEdit_);
     toolbarLayout->addStretch(1);
     toolbarLayout->addWidget(importButton_);
-    toolbarLayout->addWidget(changePasswordButton_);
+    toolbarLayout->addWidget(importFolderButton_);
+    toolbarLayout->addWidget(settingsButton_);
     toolbarLayout->addWidget(lockButton);
     layout->addWidget(toolbar);
 
@@ -328,7 +355,8 @@ QWidget* MainWindow::buildUnlockedPage() {
     detailsTree_->setRootIsDecorated(false);
     detailsTree_->setAlternatingRowColors(true);
     detailsTree_->setUniformRowHeights(true);
-    detailsTree_->setSelectionMode(QAbstractItemView::SingleSelection);
+    detailsTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    detailsTree_->setAcceptDrops(false);
     detailsTree_->header()->setStretchLastSection(true);
 
     iconList_ = new QListWidget(page);
@@ -341,7 +369,8 @@ QWidget* MainWindow::buildUnlockedPage() {
     iconList_->setResizeMode(QListView::Adjust);
     iconList_->setMovement(QListView::Static);
     iconList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
-    iconList_->setSelectionMode(QAbstractItemView::SingleSelection);
+    iconList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
+    iconList_->setAcceptDrops(false);
 
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
@@ -358,16 +387,23 @@ QWidget* MainWindow::buildUnlockedPage() {
     unlockedLocation_->setStyleSheet(QStringLiteral("color: #666666;"));
     statusCountLabel_ = new QLabel(statusBar);
     statusCountLabel_->setStyleSheet(QStringLiteral("color: #666666;"));
+    progressBar_ = new QProgressBar(statusBar);
+    progressBar_->setFixedWidth(200);
+    progressBar_->setTextVisible(true);
+    progressBar_->setFormat(QStringLiteral("%v / %m"));
+    progressBar_->hide();
     galleryStatus_ = errorLabel(statusBar);
     statusLayout->addWidget(unlockedLocation_);
     statusLayout->addStretch(1);
+    statusLayout->addWidget(progressBar_);
     statusLayout->addWidget(statusCountLabel_);
     statusLayout->addWidget(galleryStatus_);
     layout->addWidget(statusBar);
 
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
     connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
-    connect(changePasswordButton_, &QPushButton::clicked, this, [this] { beginChangePassword(); });
+    connect(importFolderButton_, &QPushButton::clicked, this, [this] { beginImportFolder(); });
+    connect(settingsButton_, &QPushButton::clicked, this, [this] { openSettings(); });
     connect(viewModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](const int index) { setViewMode(index); });
     connect(tagFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -583,7 +619,8 @@ void MainWindow::finishEditTags() {
     const auto vault = vault_;
     const auto video_id = data->video_id;
     importButton_->setEnabled(false);
-    changePasswordButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
     adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
     connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] {
         auto* completed = adminWatcher_;
@@ -591,7 +628,8 @@ void MainWindow::finishEditTags() {
         const auto outcome = *completed->result();
         completed->deleteLater();
         importButton_->setEnabled(true);
-        changePasswordButton_->setEnabled(true);
+        importFolderButton_->setEnabled(true);
+        settingsButton_->setEnabled(true);
         if (!outcome) {
             setError(galleryStatus_,
                 QString::fromUtf8(core::user_message(outcome.error().code).data()));
@@ -641,6 +679,7 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     QMenu menu(this);
     QAction* play = menu.addAction(QStringLiteral("Play"));
     QAction* editTags = menu.addAction(QStringLiteral("Edit tags…"));
+    QAction* restore = menu.addAction(QStringLiteral("Restore to folder…"));
     QAction* regenerate = menu.addAction(QStringLiteral("Regenerate thumbnail"));
     QAction* remove = menu.addAction(QStringLiteral("Remove"));
     QAction* chosen = menu.exec(global_position);
@@ -648,6 +687,19 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         beginPlayback(video_id);
     } else if (chosen == editTags) {
         beginEditTags(video_id);
+    } else if (chosen == restore) {
+        // Restore the clicked video; if the selection holds multiple items,
+        // restore all of them.
+        const auto selected = selectedVideoIds();
+        if (selected.empty()) {
+            QItemSelectionModel* model = galleryStack_->currentWidget() == detailsTree_
+                ? detailsTree_->selectionModel()
+                : iconList_->selectionModel();
+            if (model != nullptr) {
+                model->clearSelection();
+            }
+        }
+        beginRestoreSelected();
     } else if (chosen == regenerate) {
         beginGenerateThumbnail(video_id);
     } else if (chosen == remove) {
@@ -770,39 +822,257 @@ void MainWindow::beginImport() {
         return;
     }
     setError(galleryStatus_, {});
-    const QString selected = QFileDialog::getOpenFileName(
-        this, QStringLiteral("Import video"), {},
-        QStringLiteral("Video files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v);;All files (*)"));
+    const QStringList selected = QFileDialog::getOpenFileNames(
+        this, QStringLiteral("Import videos"), {},
+        QStringLiteral("Video files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.ts *.flv *.3gp *.mpg *.mpeg);;All files (*)"));
     if (selected.isEmpty()) {
         return;
     }
-
-    const auto vault = vault_;
-    const auto source = std::make_shared<std::filesystem::path>(pathFromText(selected));
-    importButton_->setEnabled(false);
-    galleryStatus_->setText(QStringLiteral("Importing…"));
-    galleryStatus_->setVisible(true);
-    importWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<std::int64_t>>>(this);
-    connect(importWatcher_, &QFutureWatcherBase::finished, this, [this] { finishImport(); });
-    importWatcher_->setFuture(QtConcurrent::run([vault, source] {
-        return std::make_shared<core::Result<std::int64_t>>(vault->import_file(*source));
-    }));
+    std::vector<std::filesystem::path> sources;
+    sources.reserve(static_cast<std::size_t>(selected.size()));
+    for (const auto& entry : selected) {
+        sources.push_back(pathFromText(entry));
+    }
+    beginImportMany(std::move(sources));
 }
 
-void MainWindow::finishImport() {
+void MainWindow::beginImportFolder() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+    const QString selected = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Import every video from a folder"), {},
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (selected.isEmpty()) {
+        return;
+    }
+    QDir directory(selected);
+    const QStringList names = directory.entryList(
+        {"*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv", "*.webm", "*.m4v",
+         "*.ts", "*.flv", "*.3gp", "*.mpg", "*.mpeg", "*.MP4", "*.MKV",
+         "*.AVI", "*.MOV", "*.WMV", "*.WEBM", "*.M4V", "*.TS", "*.FLV",
+         "*.3GP", "*.MPG", "*.MPEG"},
+        QDir::Files | QDir::Readable, QDir::Name);
+    if (names.isEmpty()) {
+        setError(galleryStatus_, QStringLiteral("No video files were found in that folder."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    std::vector<std::filesystem::path> sources;
+    sources.reserve(static_cast<std::size_t>(names.size()));
+    for (const auto& name : names) {
+        sources.push_back(pathFromText(directory.filePath(name)));
+    }
+    beginImportMany(std::move(sources));
+}
+
+void MainWindow::beginImportMany(std::vector<std::filesystem::path> sources) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+    const auto vault = vault_;
+    const auto shared_sources =
+        std::make_shared<std::vector<std::filesystem::path>>(std::move(sources));
+    const auto progress = std::make_shared<ImportProgress>();
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    galleryStatus_->setText(QStringLiteral("Importing…"));
+    galleryStatus_->setVisible(true);
+    progressBar_->setRange(0, static_cast<int>(shared_sources->size()));
+    progressBar_->setValue(0);
+    progressBar_->show();
+    importWatcher_ = new QFutureWatcher<void>(this);
+    connect(importWatcher_, &QFutureWatcherBase::finished,
+        this, [this, progress] { finishImport(progress); });
+    connect(importWatcher_, &QFutureWatcherBase::progressValueChanged,
+        this, [this](const int value) { progressBar_->setValue(value); });
+    importWatcher_->setFuture(QtConcurrent::map(
+        shared_sources->begin(), shared_sources->end(),
+        [vault, progress](const std::filesystem::path& source) {
+            if (!progress->failed.load()) {
+                auto outcome = vault->import_file(source);
+                if (!outcome) {
+                    std::lock_guard<std::mutex> guard(progress->error_mutex);
+                    if (!progress->failed.load()) {
+                        progress->first_error = outcome.error();
+                        progress->failed.store(true);
+                    }
+                } else {
+                    ++progress->succeeded;
+                }
+            }
+            ++progress->done;
+        }));
+}
+
+void MainWindow::finishImport(std::shared_ptr<ImportProgress> progress) {
     auto* completed = importWatcher_;
     importWatcher_ = nullptr;
-    const auto outcome = *completed->result();
     completed->deleteLater();
     importButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
+    progressBar_->hide();
 
-    if (!outcome) {
+    if (progress->failed.load()) {
+        core::VaultError error;
+        {
+            std::lock_guard<std::mutex> guard(progress->error_mutex);
+            error = progress->first_error;
+        }
         const QString message =
-            QString::fromUtf8(core::user_message(outcome.error().code).data());
+            QString::fromUtf8(core::user_message(error.code).data());
         setError(galleryStatus_, message);
         return;
     }
+    galleryStatus_->setText(QStringLiteral("Imported %1 video(s).")
+        .arg(progress->succeeded.load()));
+    galleryStatus_->setVisible(true);
+    refreshTagFilter();
     refreshGallery();
+}
+
+void MainWindow::openSettings() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+    auto* dialog = new SettingsDialog(vault_, this);
+    connect(dialog, &SettingsDialog::settingsChanged, this, [this] {
+        refreshTagFilter();
+        refreshGallery();
+    });
+    dialog->setAttribute(Qt::WA_DeleteOnClose);
+    dialog->show();
+}
+
+void MainWindow::beginRestoreSelected() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    setError(galleryStatus_, {});
+    const auto ids = selectedVideoIds();
+    if (ids.empty()) {
+        setError(galleryStatus_, QStringLiteral("Select one or more videos to restore."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    const QString target = QFileDialog::getExistingDirectory(
+        this, QStringLiteral("Restore selected videos to folder"), {},
+        QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
+    if (target.isEmpty()) {
+        return;
+    }
+    const auto vault = vault_;
+    const auto shared_ids = std::make_shared<std::vector<std::int64_t>>(ids);
+    const auto shared_dir = std::make_shared<std::filesystem::path>(pathFromText(target));
+    const auto progress = std::make_shared<ImportProgress>();
+    importButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
+    galleryStatus_->setText(QStringLiteral("Restoring…"));
+    galleryStatus_->setVisible(true);
+    progressBar_->setRange(0, static_cast<int>(shared_ids->size()));
+    progressBar_->setValue(0);
+    progressBar_->show();
+    restoreWatcher_ = new QFutureWatcher<void>(this);
+    connect(restoreWatcher_, &QFutureWatcherBase::finished,
+        this, [this, progress] { finishRestoreSelected(progress); });
+    connect(restoreWatcher_, &QFutureWatcherBase::progressValueChanged,
+        this, [this](const int value) { progressBar_->setValue(value); });
+    restoreWatcher_->setFuture(QtConcurrent::map(
+        shared_ids->begin(), shared_ids->end(),
+        [vault, shared_dir, progress](const std::int64_t video_id) {
+            if (!progress->failed.load()) {
+                auto outcome = vault->restore_video(video_id, *shared_dir);
+                if (!outcome) {
+                    std::lock_guard<std::mutex> guard(progress->error_mutex);
+                    if (!progress->failed.load()) {
+                        progress->first_error = outcome.error();
+                        progress->failed.store(true);
+                    }
+                } else {
+                    ++progress->succeeded;
+                }
+            }
+            ++progress->done;
+        }));
+}
+
+void MainWindow::finishRestoreSelected(std::shared_ptr<ImportProgress> progress) {
+    auto* completed = restoreWatcher_;
+    restoreWatcher_ = nullptr;
+    completed->deleteLater();
+    importButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
+    progressBar_->hide();
+    if (progress->failed.load()) {
+        core::VaultError error;
+        {
+            std::lock_guard<std::mutex> guard(progress->error_mutex);
+            error = progress->first_error;
+        }
+        const QString message =
+            QString::fromUtf8(core::user_message(error.code).data());
+        setError(galleryStatus_, message);
+        return;
+    }
+    galleryStatus_->setText(QStringLiteral("Restored %1 video(s).")
+        .arg(progress->succeeded.load()));
+    galleryStatus_->setVisible(true);
+}
+
+std::vector<std::int64_t> MainWindow::selectedVideoIds() const {
+    std::vector<std::int64_t> ids;
+    QList<QTreeWidgetItem*> tree_selection;
+    QList<QListWidgetItem*> list_selection;
+    if (galleryStack_->currentWidget() == detailsTree_) {
+        tree_selection = detailsTree_->selectedItems();
+    } else {
+        list_selection = iconList_->selectedItems();
+    }
+    ids.reserve(static_cast<std::size_t>(
+        tree_selection.size() + list_selection.size()));
+    for (auto* item : tree_selection) {
+        ids.push_back(item->data(0, Qt::UserRole).toLongLong());
+    }
+    for (auto* item : list_selection) {
+        ids.push_back(item->data(Qt::UserRole).toLongLong());
+    }
+    return ids;
+}
+
+void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
+    if (vault_ && vault_->is_unlocked() && event->mimeData()->hasUrls()) {
+        const auto urls = event->mimeData()->urls();
+        for (const auto& url : urls) {
+            if (url.isLocalFile()) {
+                event->acceptProposedAction();
+                return;
+            }
+        }
+    }
+    QMainWindow::dragEnterEvent(event);
+}
+
+void MainWindow::dropEvent(QDropEvent* event) {
+    std::vector<std::filesystem::path> sources;
+    const auto urls = event->mimeData()->urls();
+    for (const auto& url : urls) {
+        if (url.isLocalFile()) {
+            sources.push_back(pathFromText(url.toLocalFile()));
+        }
+    }
+    if (!sources.empty()) {
+        event->acceptProposedAction();
+        beginImportMany(std::move(sources));
+        return;
+    }
+    QMainWindow::dropEvent(event);
 }
 
 void MainWindow::refreshGallery() {
@@ -1000,7 +1270,8 @@ void MainWindow::beginRemoveSelected(const std::int64_t video_id) {
     }
     const auto vault = vault_;
     importButton_->setEnabled(false);
-    changePasswordButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
     adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
     connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishRemoveSelected(); });
     adminWatcher_->setFuture(QtConcurrent::run([vault, target] {
@@ -1014,7 +1285,8 @@ void MainWindow::finishRemoveSelected() {
     const auto outcome = *completed->result();
     completed->deleteLater();
     importButton_->setEnabled(true);
-    changePasswordButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
     if (!outcome) {
         const QString message =
             QString::fromUtf8(core::user_message(outcome.error().code).data());
@@ -1073,7 +1345,8 @@ void MainWindow::beginChangePassword() {
     confirmation->clear();
 
     importButton_->setEnabled(false);
-    changePasswordButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
     galleryStatus_->setText(QStringLiteral("Changing password…"));
     galleryStatus_->setVisible(true);
     adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
@@ -1092,7 +1365,8 @@ void MainWindow::finishChangePassword() {
     const auto outcome = *completed->result();
     completed->deleteLater();
     importButton_->setEnabled(true);
-    changePasswordButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
     if (!outcome) {
         const QString message =
             QString::fromUtf8(core::user_message(outcome.error().code).data());
@@ -1115,7 +1389,8 @@ void MainWindow::beginGenerateThumbnail(const std::int64_t video_id) {
     }
     const auto vault = vault_;
     importButton_->setEnabled(false);
-    changePasswordButton_->setEnabled(false);
+    importFolderButton_->setEnabled(false);
+    settingsButton_->setEnabled(false);
     galleryStatus_->setText(QStringLiteral("Generating thumbnail…"));
     galleryStatus_->setVisible(true);
     thumbnailWatcher_ =
@@ -1134,7 +1409,8 @@ void MainWindow::finishGenerateThumbnail() {
     const auto outcome = *completed->result();
     completed->deleteLater();
     importButton_->setEnabled(true);
-    changePasswordButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
     if (!outcome) {
         const QString message =
             QString::fromUtf8(core::user_message(outcome.error().code).data());
@@ -1199,7 +1475,8 @@ void MainWindow::lockVault() {
         vault_.reset();
     }
     importButton_->setEnabled(true);
-    changePasswordButton_->setEnabled(true);
+    importFolderButton_->setEnabled(true);
+    settingsButton_->setEnabled(true);
     detailsTree_->clear();
     iconList_->clear();
     tagFilterId_ = -1;
