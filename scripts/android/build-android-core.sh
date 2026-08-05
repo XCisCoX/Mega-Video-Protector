@@ -170,6 +170,12 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
         CC="$CC" \
         CFLAGS="-I$PREFIX/include -O2 -fPIC" \
         LDFLAGS="-L$PREFIX/lib" >/dev/null
+    # Generate the parser/opcode headers SERIALLY first: parallel make races
+    # them against the amalgamation compile (sqlite3.c does not declare
+    # opcodes.h/keywordhash.h as prerequisites), and stale 0-byte outputs
+    # from earlier failed runs would otherwise be picked up.
+    rm -f opcodes.h opcodes.c keywordhash.h
+    make -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
     make -j"$JOBS" >/dev/null
     make install >/dev/null
     popd >/dev/null
@@ -177,7 +183,9 @@ fi
 
 # --- ffmpeg (lean) ---------------------------------------------------------
 if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
-    fetch "https://www.ffmpeg.org/releases/ffmpeg-7.1.1.tar.xz" ffmpeg
+    # GitHub mirror: ffmpeg.org is intermittently unreachable from some
+    # networks; the mirror's tag tarballs include the in-tree configure.
+    fetch "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n7.1.1" ffmpeg
     pushd "$SRC/ffmpeg" >/dev/null
     echo "== building ffmpeg (android-arm64, lean) =="
     ./configure \
