@@ -1,14 +1,40 @@
+<div align="center">
+
+<img src="docs/MVP-logo.png" alt="Mega Video Protect" width="130" height="130" />
+
 # Mega Video Protect
 
 <p align="center">
-  <img src="docs/MVP-logo-banner.png" alt="Mega Video Protect banner">
+  <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1000&color=5B7CFA&center=true&vCenter=true&width=580&lines=Your+private+video+vault.;Encrypted+on+your+machine.;Playable+without+ever+decrypting+to+disk." alt="Typing SVG" />
 </p>
+
+[![C++20](https://img.shields.io/badge/Core-C%2B%2B%2020-536fe8?style=for-the-badge&logo=cplusplus&logoColor=white)](https://en.cppreference.com/w/cpp/20)
+[![Qt 5](https://img.shields.io/badge/UI-Qt%205-41cd52?style=for-the-badge&logo=qt&logoColor=white)](https://www.qt.io/)
+[![SQLCipher](https://img.shields.io/badge/Database-SQLCipher-65a30d?style=for-the-badge&logo=sqlite&logoColor=white)](https://www.zetetic.net/sqlcipher/)
+[![Argon2id](https://img.shields.io/badge/KDF-Argon2id-8b5cf6?style=for-the-badge)](https://en.wikipedia.org/wiki/Argon2)
+[![libsodium](https://img.shields.io/badge/Crypto-libsodium-4f8ef7?style=for-the-badge)](https://doc.libsodium.org/)
+[![FFmpeg](https://img.shields.io/badge/Media-FFmpeg-d63031?style=for-the-badge&logo=ffmpeg&logoColor=white)](https://ffmpeg.org/)
+[![CMake](https://img.shields.io/badge/Build-CMake-064f8c?style=for-the-badge&logo=cmake&logoColor=white)](https://cmake.org/)
+
+</div>
+
+---
+
+![Mega Video Protect banner](docs/MVP-logo-banner.png)
+
+<div align="center">
+
+[![Platform](https://img.shields.io/badge/Platform-Linux%20%7C%20Windows-informational?style=flat-square)]() &nbsp;
+[![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)]() &nbsp;
+[![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)]()
+
+**[Features](#features)** · **[Screenshots](#screenshots)** · **[Security model](#security-model)** · **[Build & run](#build--run)** · **[Project layout](#project-layout)**
+
+</div>
 
 **Your private video vault — encrypted on your machine, playable without ever decrypting to disk.**
 
 Mega Video Protect is a desktop video organizer that treats privacy as the default. Every video you import is split into authenticated, encrypted packages stored inside a vault locked by a password you choose; nothing leaves your computer. The app plays back your videos **in memory** through a streaming, tamper-checked reader — the plaintext never touches your disk.
-
-![Mega Video Protect gallery](docs/screenshots/03-gallery-details.png)
 
 ## Features
 
@@ -88,7 +114,7 @@ core/        Qt-independent C++20 library: crypto, SQLCipher database, .vvp
 qt-app/      Qt 5 desktop application: setup/login, gallery, player, settings
 tests/       ctest suites for the core (headless)
 scripts/     Windows-only FFmpeg import-library regeneration
-third_party/ vcpkg overlay ports (Windows builds)
+third_party/ vcpkg overlay ports + release-only CI triplet (Windows builds)
 .github/     Release CI: Windows x64 + Linux x64, both test suites
 ```
 
