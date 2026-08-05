@@ -149,6 +149,10 @@ if [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     make install >/dev/null
     popd >/dev/null
 fi
+# NOTE: libsodium's bundled argon2 exports the SAME phc argon2* API, so the
+# Android CMake link uses libsodium for argon2 and never links libargon2.a
+# (linking both archives duplicates every argon2 symbol). libargon2.a is
+# still built above only for its installed header.
 
 # --- sqlcipher -------------------------------------------------------------
 if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
@@ -168,7 +172,7 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
         --disable-tcl --disable-tests \
         --with-crypto-lib=openssl \
         CC="$CC" \
-        CFLAGS="-I$PREFIX/include -O2 -fPIC" \
+        CFLAGS="-I$PREFIX/include -O2 -fPIC -DSQLITE_HAS_CODEC" \
         LDFLAGS="-L$PREFIX/lib" >/dev/null
     # Generate the parser/opcode headers SERIALLY first: parallel make races
     # them against the amalgamation compile (sqlite3.c does not declare
@@ -194,9 +198,9 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
         --disable-programs --disable-doc --disable-network --disable-autodetect \
         --disable-everything \
         --enable-avcodec --enable-avformat --enable-avutil --enable-swscale --enable-swresample \
-        --enable-encoder=mjpeg --enable-muxer=matroska,mp4 \
-        --enable-decoder=mjpeg,h264,aac --enable-demuxer=matroska,mp4 \
-        --enable-parser=mjpeg,h264,aac --enable-protocol=file \
+        --enable-encoder=mjpeg --enable-muxer=matroska \
+        --enable-decoder=mjpeg --enable-demuxer=matroska \
+        --enable-parser=mjpeg --enable-protocol=file \
         --enable-small --disable-zlib --disable-bzlib --disable-lzma --disable-iconv \
         --prefix="$PREFIX" >/dev/null
     make -j"$JOBS" >/dev/null

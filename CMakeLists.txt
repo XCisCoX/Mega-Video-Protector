@@ -32,11 +32,34 @@ endif()
 #            required so the imported DLL targets and .lib paths resolve.
 #   Linux:   distro packages discovered through pkg-config (see
 #            core/CMakeLists.txt); no vcpkg install root is required.
+#   Android: NDK cross-build; dependencies compiled by
+#            scripts/android/build-android-core.sh into MVP_ANDROID_PREFIX.
+# The *_LIBS / include variables are defined HERE (root scope) so every
+# subdirectory — core, qt-app, tests — sees the same dependency set.
 if(WIN32)
     if(NOT DEFINED VCPKG_INSTALLED_DIR OR NOT DEFINED VCPKG_TARGET_TRIPLET)
         message(FATAL_ERROR "Phase 2 requires the pinned vcpkg manifest and x64 triplet.")
     endif()
     set(MVP_VCPKG_PREFIX "${VCPKG_INSTALLED_DIR}/${VCPKG_TARGET_TRIPLET}")
+elseif(ANDROID)
+    set(MVP_ANDROID_PREFIX
+        "${CMAKE_SOURCE_DIR}/out/android-arm64/prefix" CACHE PATH
+        "Android dependency install prefix (built by scripts/android/build-android-core.sh)")
+    set(MVP_SODIUM_LIBS "${MVP_ANDROID_PREFIX}/lib/libsodium.a")
+    # Argon2 is NOT linked separately on Android: libsodium bundles the same
+    # phc-winner-argon2 code and exports the identical argon2* API, and
+    # linking both archives duplicates every symbol. libargon2's installed
+    # header (MVP_DEP_INCLUDE_DIRS) is still used for the core's includes.
+    set(MVP_ARGON2_LIBS "")
+    set(MVP_SQLCIPHER_LIBS "${MVP_ANDROID_PREFIX}/lib/libsqlcipher.a")
+    set(MVP_FFMPEG_LIBS
+        "${MVP_ANDROID_PREFIX}/lib/libavformat.a"
+        "${MVP_ANDROID_PREFIX}/lib/libavcodec.a"
+        "${MVP_ANDROID_PREFIX}/lib/libavutil.a"
+        "${MVP_ANDROID_PREFIX}/lib/libswscale.a"
+        "${MVP_ANDROID_PREFIX}/lib/libswresample.a"
+    )
+    set(MVP_DEP_INCLUDE_DIRS "${MVP_ANDROID_PREFIX}/include")
 else()
     set(MVP_VCPKG_PREFIX "" CACHE INTERNAL "vcpkg install root (Windows only)" FORCE)
 endif()
