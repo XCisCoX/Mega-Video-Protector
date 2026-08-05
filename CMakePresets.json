@@ -24,6 +24,28 @@
         "MVP_BUILD_APP": "ON",
         "MVP_BUILD_TESTS": "ON"
       }
+    },
+    {
+      "name": "linux-debug",
+      "displayName": "Linux Debug (system Qt 5 + pkg-config deps)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/linux-debug",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Debug",
+        "MVP_BUILD_APP": "ON",
+        "MVP_BUILD_TESTS": "ON"
+      }
+    },
+    {
+      "name": "linux-release",
+      "displayName": "Linux Release (system Qt 5 + pkg-config deps)",
+      "generator": "Unix Makefiles",
+      "binaryDir": "${sourceDir}/out/build/linux-release",
+      "cacheVariables": {
+        "CMAKE_BUILD_TYPE": "Release",
+        "MVP_BUILD_APP": "ON",
+        "MVP_BUILD_TESTS": "ON"
+      }
     }
   ],
   "buildPresets": [
@@ -36,6 +58,14 @@
       "name": "vs2022-x64-release",
       "configurePreset": "vs2022-x64",
       "configuration": "Release"
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug"
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release"
     }
   ],
   "testPresets": [
@@ -49,6 +79,16 @@
       "name": "vs2022-x64-release",
       "configurePreset": "vs2022-x64",
       "configuration": "Release",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-debug",
+      "configurePreset": "linux-debug",
+      "output": { "outputOnFailure": true }
+    },
+    {
+      "name": "linux-release",
+      "configurePreset": "linux-release",
       "output": { "outputOnFailure": true }
     }
   ]

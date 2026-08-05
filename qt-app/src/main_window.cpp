@@ -42,11 +42,9 @@
 #include <QVBoxLayout>
 #include <QWidget>
 
-#define WIN32_LEAN_AND_MEAN
-#include <Windows.h>
-
 #include <algorithm>
 #include <atomic>
+#include <cstddef>
 #include <mutex>
 #include <string>
 #include <utility>
@@ -69,7 +67,13 @@ QString textFromPath(const std::filesystem::path& path) {
 
 void clearSecret(std::string& secret) noexcept {
     if (!secret.empty()) {
-        SecureZeroMemory(secret.data(), secret.size());
+        // Portable best-effort wipe the optimizer cannot elide. Replaces the
+        // former Windows-only SecureZeroMemory so the app builds everywhere.
+        volatile unsigned char* bytes =
+            reinterpret_cast<volatile unsigned char*>(secret.data());
+        for (std::size_t i = 0; i < secret.size(); ++i) {
+            bytes[i] = 0U;
+        }
         secret.clear();
         secret.shrink_to_fit();
     }

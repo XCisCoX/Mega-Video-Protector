@@ -1,8 +1,14 @@
 # Mega Video Protect
 
-Production-oriented Windows video-vault project. Phase 1 (architecture and verified build foundation), Phase 2 (secure vault core + setup/login UI shell), Phase 3 (encrypted import + gallery), Phase 4 (vault administration: removal and password change), Phase 5 (streaming authenticated reader, FFmpeg media probing, and encrypted thumbnails), Phase 6 (auto-thumbnails on import, thumbnail re-keying on password change, Explorer-style gallery views, and in-memory video playback), and Phase 7 (multi-tag organization with tag filtering, and a full Windows Explorer-style unlocked view) are complete.
+Cross-platform (Windows x64 + Linux x64) secure video-vault desktop application. Phase 1 (architecture and verified build foundation), Phase 2 (secure vault core + setup/login UI shell), Phase 3 (encrypted import + gallery), Phase 4 (vault administration: removal and password change), Phase 5 (streaming authenticated reader, FFmpeg media probing, and encrypted thumbnails), Phase 6 (auto-thumbnails on import, thumbnail re-keying on password change, Explorer-style gallery views, and in-memory video playback), and Phase 7 (multi-tag organization with tag filtering, and a full Explorer-style unlocked view) are complete. Windows and Linux builds share the same codebase; platform-specific pieces are limited to atomic file I/O and dependency discovery (see below).
 
-## Verified local toolchain
+## Platforms
+
+- **Windows x64** (primary): MSVC 2022 + Qt 5.12.12 + vcpkg manifest dependencies.
+- **Linux x64**: GCC + distro Qt 5 / FFmpeg / SQLCipher / Argon2 / libsodium via pkg-config (validated on Ubuntu 24.04).
+- The core (`VideoVaultCore`) is Qt-independent C++20 and is identical on both platforms. Platform-specific code is confined to `core/src/metadata.cpp` (Win32 vs POSIX atomic file I/O, selected by `_WIN32`) and the CMake dependency-discovery blocks.
+
+## Verified Windows toolchain
 
 - Visual Studio 2022 Build Tools 17.14.21, MSVC toolset 14.44.35207
 - CMake 3.31.6 and ctest (Visual Studio bundled)
@@ -27,7 +33,7 @@ Phase 2 pins the production cryptographic/database dependencies through the vcpk
 
 vcpkg build trees, packages, AND the install root are redirected outside the project (`C:/Users/cisco/AppData/Local/MegaVideoProtect/...`) because the source path contains a space — FFmpeg's MSVC response files break on the space in "Mega King" (LNK1181 on `-libpath`). `VCPKG_MANIFEST_INSTALL` is OFF in the preset; `VCPKG_INSTALLED_DIR` points at the AppData install root (git-ignored).
 
-## Build
+## Build (Windows)
 
 From a Visual Studio developer shell, or with the bundled CMake executable:
 
@@ -38,6 +44,30 @@ ctest --preset vs2022-x64-debug
 ```
 
 The generated Visual Studio solution is under `out/build/vs2022-x64` and supports Debug and Release. Only Debug has been exercised; Release verification is scheduled for a later phase.
+
+## Build (Linux)
+
+Ubuntu 24.04 packages (other distros provide the same libraries; names may differ):
+
+```text
+sudo apt install qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
+  libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+  libsqlcipher-dev libargon2-dev libsodium-dev \
+  gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+```
+
+Build and test (all 7 suites run headless via the offscreen Qt platform):
+
+```text
+cmake --preset linux-debug            # or linux-release
+cmake --build --preset linux-debug -j "$(nproc)"
+ctest --preset linux-debug --output-on-failure
+```
+
+The app binary is `out/build/linux-debug/qt-app/MegaVideoProtect`. Runtime notes:
+
+- Audio output uses Qt 5 Multimedia (GStreamer backend) — `libqt5multimedia5-plugins` and GStreamer base/good plugins are required.
+- The Linux build links distro shared libraries (Qt, FFmpeg 6.1, SQLCipher, Argon2, libsodium). The vcpkg manifest and `scripts/regenerate-ffmpeg-importlibs.sh` are Windows-only concerns and are not used on Linux.
 
 ## Phase 2 verified behavior
 
@@ -116,12 +146,15 @@ The generated Visual Studio solution is under `out/build/vs2022-x64` and support
 
 ## Releases (GitHub Actions)
 
-`.github/workflows/release.yml` builds a Windows x64 Release package on GitHub and publishes it as a GitHub Release. Two ways to trigger it:
+`.github/workflows/release.yml` builds Release packages for **Windows x64 and Linux x64** on GitHub and publishes them as a GitHub Release. Two ways to trigger it:
 
 1. **Manual** — GitHub → Actions → "Release" → *Run workflow* → optionally type a version (e.g. `0.4.0`; empty = auto `vYYYY.MM.DD.HHMM`). The workflow creates the tag itself.
 2. **Tag push** — `git tag v0.4.0 && git push origin v0.4.0`.
 
-What it does: fresh vcpkg bootstrap (the repo pins baseline `b1b19307…`), installs argon2/libsodium/sqlcipher/ffmpeg (lean, with `swresample`), regenerates the FFmpeg import libraries from the DLL export tables (vcpkg's are stubs — same step local builds require), configures with the `vs2022-x64` preset overridden for CI paths (Qt from `jurplel/install-qt-action`, space-free `RUNNER_TEMP` install root), builds **Release**, runs all 7 ctest suites, and attaches `MegaVideoProtect-windows-x64.zip` (exe + Qt runtime via `windeployqt` + the five FFmpeg DLLs) to the release.
+What it does:
+- **Windows job**: fresh vcpkg bootstrap (the repo pins baseline `b1b19307…`), installs argon2/libsodium/sqlcipher/ffmpeg (lean, with `swresample`), regenerates the FFmpeg import libraries from the DLL export tables (vcpkg's are stubs — same step local builds require), configures with the `vs2022-x64` preset overridden for CI paths (Qt from `jurplel/install-qt-action`, space-free `RUNNER_TEMP` install root), builds **Release**, runs all 7 ctest suites, and packages `MegaVideoProtect-windows-x64.zip` (exe + Qt runtime via `windeployqt` + the five FFmpeg DLLs).
+- **Linux job**: installs distro Qt 5 / FFmpeg / SQLCipher / Argon2 / libsodium via apt, builds the `linux-release` preset, runs all 7 ctest suites headless (offscreen Qt platform), and packages `MegaVideoProtect-linux-x64.tar.gz` (the binary; it links distro shared libraries).
+- **Release job**: collects both artifacts and attaches them to the GitHub Release.
 
 Notes:
 - The Release configuration is verified locally before shipping (see the test targets); the workflow mirrors the local build chain, so a green local build+ctest is a strong predictor of a green CI run.
@@ -131,7 +164,7 @@ Notes:
 ## Current targets
 
 - `VideoVaultCore`: Qt-independent C++20 static library
-- `VideoVaultApp`: Qt 5.12.12 Windows GUI linked to the core (output `MegaVideoProtect.exe`)
+- `VideoVaultApp`: Qt 5 (5.12+; Windows GUI linked to the core; output `MegaVideoProtect.exe` on Windows, `MegaVideoProtect` on Linux)
 - `VideoVaultCoreTests`: smoke test for create/open/lock, wrong password, password validation, and verifier tamper detection
 - `VideoVaultCoreGalleryTests`: import, gallery listing, package layout, decrypt round-trip (multi-chunk and empty), persistence across reopen, tamper (`PackageModified`), and missing-package (`PackageMissing`) tests
 - `VideoVaultCoreAdminTests`: video removal (row, package file, survivor integrity, idempotency) and password change (old/new credential behavior, gallery survival, chained changes, wrong-current rejection, locked-vault failures)
@@ -147,7 +180,7 @@ Notes:
 - `read_video_bytes` decrypts a whole package into memory; it is intended for verification/export of reasonably sized files. `read_video_range` and `PackageReader` are the bounded paths.
 - Thumbnails are generated at import time (best effort for media content) and can be regenerated per video.
 - The media test fixture uses MJPEG-in-Matroska; real-world container/codec variety (H.264/MP4, rotation metadata, audio-only streams) is exercised only as far as the FFmpeg build's internal codecs allow. The lean FFmpeg build has no external codec libraries (no H.264/HEVC encoders; decoders that ship inside FFmpeg remain available).
-- FFmpeg Windows quirks: regenerated import libraries and `extern "C"` include wrapping are required (see Dependencies); `scripts/regenerate-ffmpeg-importlibs.sh` must be re-run after any vcpkg reinstall of ffmpeg.
+- FFmpeg quirks: the 7.x public headers carry no `extern "C"` guards (the sources wrap every FFmpeg include). On Windows only, the vcpkg port installs stub import libraries that must be regenerated from the DLL export tables (`scripts/regenerate-ffmpeg-importlibs.sh` must be re-run after any vcpkg reinstall of ffmpeg); Linux links the distro shared libraries directly and needs no such step.
 - Import has no cancellation or progress callback yet; the UI shows a busy state.
 - A crash in the middle of a password change can leave the vault in a state where neither the old nor the new password cleanly unlocks it (data is intact; recovery tooling and crash-injection tests are outstanding). The happy path is fully verified.
 - Argon2id is invoked through the `argon2` port directly rather than libsodium's `crypto_pwhash` wrapper; both were considered, the direct port was pinned. See `docs/architecture.md`.

@@ -1,7 +1,14 @@
 #include "internal/metadata.hpp"
 
+#ifdef _WIN32
 #define WIN32_LEAN_AND_MEAN
 #include <Windows.h>
+#else
+#include <fcntl.h>
+#include <unistd.h>
+
+#include <cerrno>
+#endif
 
 #include <algorithm>
 #include <array>
@@ -29,34 +36,6 @@ constexpr std::uint32_t kKdfArgon2id = 1U;
 constexpr std::size_t kNonceOffset = kVaultHeaderSize;
 constexpr std::size_t kCiphertextOffset = kNonceOffset + kVerifierNonceSize;
 
-class UniqueHandle final {
-public:
-    explicit UniqueHandle(HANDLE handle = INVALID_HANDLE_VALUE) noexcept : handle_(handle) {}
-    ~UniqueHandle() { reset(); }
-    UniqueHandle(const UniqueHandle&) = delete;
-    UniqueHandle& operator=(const UniqueHandle&) = delete;
-    UniqueHandle(UniqueHandle&& other) noexcept : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
-    UniqueHandle& operator=(UniqueHandle&& other) noexcept {
-        if (this != &other) {
-            reset();
-            handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
-        }
-        return *this;
-    }
-    [[nodiscard]] bool valid() const noexcept {
-        return handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr;
-    }
-    [[nodiscard]] HANDLE get() const noexcept { return handle_; }
-private:
-    void reset() noexcept {
-        if (valid()) {
-            (void)CloseHandle(handle_);
-        }
-        handle_ = INVALID_HANDLE_VALUE;
-    }
-    HANDLE handle_;
-};
-
 void write_u32_le(std::span<unsigned char> destination, const std::uint32_t value) {
     destination[0] = static_cast<unsigned char>(value & 0xffU);
     destination[1] = static_cast<unsigned char>((value >> 8U) & 0xffU);
@@ -69,16 +48,6 @@ std::uint32_t read_u32_le(const std::span<const unsigned char> source) {
         | (static_cast<std::uint32_t>(source[1]) << 8U)
         | (static_cast<std::uint32_t>(source[2]) << 16U)
         | (static_cast<std::uint32_t>(source[3]) << 24U);
-}
-
-VaultError windows_error(const char* operation, const DWORD code) {
-    VaultErrorCode mapped = VaultErrorCode::DatabaseFailure;
-    if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
-        mapped = VaultErrorCode::PermissionDenied;
-    } else if (code == ERROR_DISK_FULL || code == ERROR_HANDLE_DISK_FULL) {
-        mapped = VaultErrorCode::DiskFull;
-    }
-    return {mapped, std::string(operation) + " failed with Windows error " + std::to_string(code)};
 }
 
 Result<std::vector<unsigned char>> read_exact_file(
@@ -211,6 +180,52 @@ Result<VaultMetadata> read_metadata_file(const std::filesystem::path& path) {
     return metadata;
 }
 
+#ifdef _WIN32
+namespace {
+
+class UniqueHandle final {
+public:
+    explicit UniqueHandle(HANDLE handle = INVALID_HANDLE_VALUE) noexcept : handle_(handle) {}
+    ~UniqueHandle() { reset(); }
+    UniqueHandle(const UniqueHandle&) = delete;
+    UniqueHandle& operator=(const UniqueHandle&) = delete;
+    UniqueHandle(UniqueHandle&& other) noexcept : handle_(std::exchange(other.handle_, INVALID_HANDLE_VALUE)) {}
+    UniqueHandle& operator=(UniqueHandle&& other) noexcept {
+        if (this != &other) {
+            reset();
+            handle_ = std::exchange(other.handle_, INVALID_HANDLE_VALUE);
+        }
+        return *this;
+    }
+    [[nodiscard]] bool valid() const noexcept {
+        return handle_ != INVALID_HANDLE_VALUE && handle_ != nullptr;
+    }
+    [[nodiscard]] HANDLE get() const noexcept { return handle_; }
+private:
+    void reset() noexcept {
+        if (valid()) {
+            (void)CloseHandle(handle_);
+        }
+        handle_ = INVALID_HANDLE_VALUE;
+    }
+    HANDLE handle_;
+};
+
+VaultError windows_error(const char* operation, const DWORD code) {
+    VaultErrorCode mapped = VaultErrorCode::DatabaseFailure;
+    if (code == ERROR_ACCESS_DENIED || code == ERROR_SHARING_VIOLATION) {
+        mapped = VaultErrorCode::PermissionDenied;
+    } else if (code == ERROR_DISK_FULL || code == ERROR_HANDLE_DISK_FULL) {
+        mapped = VaultErrorCode::DiskFull;
+    }
+    return {mapped, std::string(operation) + " failed with Windows error " + std::to_string(code)};
+}
+
+} // namespace
+#endif
+
+#ifdef _WIN32
+
 Result<bool> write_atomic_file(
     const std::filesystem::path& path,
     const std::span<const unsigned char> bytes) {
@@ -267,6 +282,132 @@ Result<bool> move_file_atomic(
     }
     return true;
 }
+
+#else // POSIX (Linux, macOS, ...)
+
+namespace {
+
+VaultError posix_error(const char* operation, const int code) {
+    VaultErrorCode mapped = VaultErrorCode::DatabaseFailure;
+    if (code == EACCES || code == EPERM) {
+        mapped = VaultErrorCode::PermissionDenied;
+    } else if (code == ENOSPC || code == EDQUOT) {
+        mapped = VaultErrorCode::DiskFull;
+    }
+    return {mapped, std::string(operation) + " failed with errno " + std::to_string(code)
+                        + " (" + std::strerror(code) + ")"};
+}
+
+// fsyncs the parent directory of `path` so a completed rename is durable.
+// Best effort: filesystems that reject directory fsync (EINVAL/EROFS/ENOTSUP)
+// or directories that cannot be opened are simply skipped.
+void sync_parent_directory(const std::filesystem::path& path) noexcept {
+    const auto parent = path.parent_path().empty()
+        ? std::filesystem::path(".")
+        : path.parent_path();
+    const int dir_fd = ::open(parent.c_str(), O_RDONLY | O_DIRECTORY | O_CLOEXEC);
+    if (dir_fd < 0) {
+        return;
+    }
+    if (::fsync(dir_fd) != 0) {
+        const int code = errno;
+        if (code == EINVAL || code == EROFS || code == ENOTSUP) {
+            (void)::close(dir_fd);
+            return;
+        }
+    }
+    (void)::close(dir_fd);
+}
+
+Result<bool> write_all(int fd, const std::span<const unsigned char> bytes) {
+    std::size_t offset = 0U;
+    while (offset < bytes.size()) {
+        const auto remaining = bytes.size() - offset;
+        const auto request = static_cast<std::size_t>(std::min<std::size_t>(
+            remaining, static_cast<std::size_t>(std::numeric_limits<::ssize_t>::max())));
+        const ::ssize_t written = ::write(fd, bytes.data() + offset, request);
+        if (written < 0) {
+            if (errno == EINTR) {
+                continue;
+            }
+            return posix_error("write temporary file", errno);
+        }
+        if (written == 0) {
+            return VaultError{VaultErrorCode::DiskFull,
+                "write temporary file produced no progress"};
+        }
+        offset += static_cast<std::size_t>(written);
+    }
+    return true;
+}
+
+} // namespace
+
+Result<bool> write_atomic_file(
+    const std::filesystem::path& path,
+    const std::span<const unsigned char> bytes) {
+    auto temporary = path;
+    temporary += L".write.tmp";
+    const int fd = ::open(
+        temporary.c_str(), O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, 0600);
+    if (fd < 0) {
+        return posix_error("create temporary file", errno);
+    }
+
+    auto written = write_all(fd, bytes);
+    if (written) {
+        // Writes succeeded; flush to stable storage before the rename.
+        if (::fsync(fd) != 0) {
+            written = posix_error("flush temporary file", errno);
+        }
+    }
+    const int close_code = ::close(fd);
+    if (!written) {
+        ::unlink(temporary.c_str());
+        return written.error();
+    }
+    if (close_code != 0) {
+        ::unlink(temporary.c_str());
+        return posix_error("close temporary file", errno);
+    }
+
+    if (::rename(temporary.c_str(), path.c_str()) != 0) {
+        const int code = errno;
+        ::unlink(temporary.c_str());
+        return posix_error("atomic rename", code);
+    }
+    sync_parent_directory(path);
+    return true;
+}
+
+Result<bool> flush_existing_file(const std::filesystem::path& path) {
+    const int fd = ::open(path.c_str(), O_WRONLY | O_CLOEXEC);
+    if (fd < 0) {
+        return posix_error("open file for flush", errno);
+    }
+    const int sync_result = ::fsync(fd);
+    const int sync_code = errno;
+    const int close_code = ::close(fd);
+    if (sync_result != 0) {
+        return posix_error("flush existing file", sync_code);
+    }
+    if (close_code != 0) {
+        return posix_error("close after flush", errno);
+    }
+    return true;
+}
+
+Result<bool> move_file_atomic(
+    const std::filesystem::path& source,
+    const std::filesystem::path& destination) {
+    if (::rename(source.c_str(), destination.c_str()) != 0) {
+        return posix_error("atomic file move", errno);
+    }
+    sync_parent_directory(destination);
+    return true;
+}
+
+#endif // _WIN32
 
 Result<bool> write_ready_marker(
     const std::filesystem::path& path,
