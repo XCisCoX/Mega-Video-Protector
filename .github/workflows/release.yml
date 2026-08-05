@@ -115,8 +115,9 @@ jobs:
         run: |
           # Prepend the runtime DLL dirs INSIDE the step. An env-block PATH
           # override would use $(PATH), which GitHub Actions does not expand
-          # (only ${{ }} is expanded) — PowerShell then evaluates $(PATH) to
-          # an empty string and the system PATH (and ctest with it) is lost.
+          # (only double-brace template expressions are) — PowerShell then
+          # evaluates $(PATH) to an empty string and the system PATH (and
+          # ctest with it) is lost.
           $env:PATH = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows-release\bin;$env:QT_ROOT_DIR\bin;$env:PATH"
           ctest --test-dir out/build/vs2022-x64 -C Release --output-on-failure
 
