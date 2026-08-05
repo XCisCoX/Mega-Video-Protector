@@ -1,11 +1,13 @@
 #pragma once
 
 #include <array>
+#include <atomic>
 #include <cstdint>
-#include <functional>
 #include <filesystem>
+#include <functional>
 #include <memory>
 #include <mutex>
+#include <span>
 #include <string>
 #include <string_view>
 #include <type_traits>
@@ -241,11 +243,18 @@ public:
 private:
     class Impl;
     explicit Vault(std::filesystem::path root, std::unique_ptr<Impl> impl) noexcept;
+    Vault(Vault&& other) noexcept;
 
     // Guards impl_ and all operations on it. Held by unique_ptr so the mutex
     // address is stable across Vault moves. Vault methods are safe to call
     // from a worker thread while the owner may lock() concurrently.
     std::unique_ptr<std::mutex> mutex_;
+
+    // Lock-free mirror of "impl_ != nullptr" so UI event paths (e.g. an
+    // application-level event filter) can ask whether the vault is unlocked
+    // without blocking on mutex_ — which a worker import holds for the whole
+    // duration of each file. Blocking there would freeze the UI thread.
+    std::atomic<bool> unlocked_{false};
 
     std::filesystem::path root_;
     std::unique_ptr<Impl> impl_;
