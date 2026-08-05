@@ -11,6 +11,7 @@
 #include <QDialog>
 #include <QDialogButtonBox>
 #include <QDir>
+#include <QStandardPaths>
 #include <QDragEnterEvent>
 #include <QDropEvent>
 #include <QEvent>
@@ -304,6 +305,17 @@ QWidget* MainWindow::buildLoginPage() {
     locationRow->addWidget(loginLocation_, 1);
     locationRow->addWidget(browse);
     layout->addLayout(locationRow);
+
+#ifdef Q_OS_ANDROID
+    // Android has no desktop file dialogs and no user-visible filesystem;
+    // the vault lives in the app-private sandbox (no storage permission
+    // needed, wiped with the app). The Browse buttons become no-ops because
+    // QFileDialog returns an empty path on Android.
+    const QString sandbox =
+        QStandardPaths::writableLocation(QStandardPaths::AppDataLocation);
+    setupLocation_->setText(QDir::toNativeSeparators(sandbox));
+    loginLocation_->setText(QDir::toNativeSeparators(sandbox));
+#endif
 
     loginPassword_ = new QLineEdit(card);
     loginPassword_->setEchoMode(QLineEdit::Password);

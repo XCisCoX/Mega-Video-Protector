@@ -15,7 +15,7 @@ if(WIN32)
     enable_language(RC)
 endif()
 
-add_executable(VideoVaultApp WIN32
+set(MVP_APP_SOURCES
     src/main.cpp
     src/main_window.cpp
     src/media_decoder.cpp
@@ -30,6 +30,17 @@ add_executable(VideoVaultApp WIN32
     resources/resources.qrc
 )
 
+if(ANDROID)
+    # Android apps are shared libraries: androiddeployqt packages the .so into
+    # the APK, where the Qt Activity (android.app.lib_name = MegaVideoProtect)
+    # loads it. There is no WIN32 subsystem or .rc resource on Android.
+    add_library(VideoVaultApp SHARED ${MVP_APP_SOURCES})
+    set_target_properties(VideoVaultApp PROPERTIES
+        QT_ANDROID_PACKAGE_SOURCE_DIR "${CMAKE_CURRENT_SOURCE_DIR}/android")
+else()
+    add_executable(VideoVaultApp WIN32 ${MVP_APP_SOURCES})
+endif()
+
 if(WIN32)
     # Embeds the application icon into MegaVideoProtect.exe (Explorer,
     # taskbar, and the Alt-Tab icon all come from this resource).
@@ -42,6 +53,9 @@ target_include_directories(VideoVaultApp PRIVATE
 if(WIN32)
     # vcpkg FFmpeg headers (Linux pkg-config targets carry their own includes).
     target_include_directories(VideoVaultApp PRIVATE "${MVP_VCPKG_PREFIX}/include")
+elseif(ANDROID)
+    # NDK-built FFmpeg/sodium/sqlcipher headers live in the dep prefix.
+    target_include_directories(VideoVaultApp PRIVATE ${MVP_DEP_INCLUDE_DIRS})
 endif()
 
 target_link_libraries(VideoVaultApp
