@@ -65,19 +65,25 @@ NINJA="${NINJA:-$(command -v ninja || echo /opt/android-sdk-linux/cmake/3.31.6/b
 
 mkdir -p "$SRC" "$PREFIX"
 
+# The container usually runs as root; always hand the build outputs back to
+# the invoking user (HOST_UID), even when a later step fails.
+if [ -n "${HOST_UID:-}" ]; then
+    trap 'chown -R "$HOST_UID" "$OUT" 2>/dev/null || true' EXIT
+fi
+
 # The NDK container image ships CMake/ninja but not make (openssl, sqlcipher
 # and ffmpeg all build with make) or tclsh (sqlcipher's build system needs it
 # to generate files). Install them when missing (needs root — run the
 # container without --user).
 if ! command -v make >/dev/null 2>&1 || ! command -v tclsh >/dev/null 2>&1 \
-        || ! command -v gcc >/dev/null 2>&1; then
-    echo "== installing make + tcl + gcc =="
+        || ! command -v gcc >/dev/null 2>&1 || ! command -v qemu-aarch64 >/dev/null 2>&1; then
+    echo "== installing make + tcl + gcc + qemu-user =="
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null && apt-get install -y -qq make tcl gcc libc6-dev >/dev/null
+        apt-get update -qq >/dev/null && apt-get install -y -qq make tcl gcc libc6-dev qemu-user >/dev/null
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache make tcl gcc >/dev/null
+        apk add --no-cache make tcl gcc qemu-user >/dev/null
     else
-        echo "ERROR: make/tcl/gcc not found and no package manager available"; exit 1
+        echo "ERROR: build tools not found and no package manager available"; exit 1
     fi
 fi
 
@@ -180,8 +186,12 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
     # from earlier failed runs would otherwise be picked up.
     rm -f opcodes.h opcodes.c keywordhash.h
     make -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
-    make -j"$JOBS" >/dev/null
-    make install >/dev/null
+    # Build ONLY the static library, not the `sqlcipher` shell binary: the
+    # shell links the codec against Android's logcat logging and would need
+    # -llog plus a working tclsh at runtime, and nothing uses it here.
+    make -j"$JOBS" libsqlcipher.la >/dev/null
+    cp .libs/libsqlcipher.a "$PREFIX/lib/"
+    cp sqlite3.h "$PREFIX/include/"
     popd >/dev/null
 fi
 
@@ -221,9 +231,13 @@ echo "== building core + tests =="
 "$CMAKE_BIN" --build "$OUT/build" -j"$JOBS"
 
 # --- run the aarch64 binaries under qemu (host-side validation) ------------
+SYSROOT_LIB="$TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/$API"
 QEMU="$(command -v qemu-aarch64 || true)"
 if [ -n "$QEMU" ]; then
-    SYSROOT_LIB="$TOOLCHAIN/sysroot/usr/lib/aarch64-linux-android/$API"
+    # The test executables are dynamically linked against bionic; qemu-user
+    # resolves libc/libm/liblog from the NDK sysroot via -L. The Android
+    # dynamic linker (/system/bin/linker64) is not shipped by the NDK, so
+    # qemu falls back to the sysroot's bionic loader when available.
     echo "== running aarch64 tests under $QEMU =="
     for t in VideoVaultCoreTests VideoVaultCoreGalleryTests VideoVaultCoreAdminTests \
              VideoVaultCoreReaderTests VideoVaultCoreMediaTests VideoVaultCoreTagTests; do
@@ -234,12 +248,9 @@ if [ -n "$QEMU" ]; then
     done
     echo "ALL ANDROID CORE TESTS PASSED"
 else
-    echo "qemu-aarch64 not found on this host; binaries built but not executed."
-    echo "  install qemu-user and re-run the test loop:"
-    echo "  for t in ...; do TMPDIR=/tmp qemu-aarch64 -L $SYSROOT_LIB out/android-arm64/build/tests/\$t; done"
-fi
-
-# Hand the build outputs back to the invoking user (container runs as root).
-if [ -n "${HOST_UID:-}" ]; then
-    chown -R "$HOST_UID" "$OUT" 2>/dev/null || true
+    echo "qemu-aarch64 not found in this environment; binaries built but not executed."
+    echo "  To run them, install qemu-user (inside this container, as root):"
+    echo "    apt-get update && apt-get install -y qemu-user"
+    echo "  then re-run this script — the test loop needs the NDK sysroot at:"
+    echo "    $SYSROOT_LIB"
 fi

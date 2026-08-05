@@ -46,12 +46,16 @@ elseif(ANDROID)
         "${CMAKE_SOURCE_DIR}/out/android-arm64/prefix" CACHE PATH
         "Android dependency install prefix (built by scripts/android/build-android-core.sh)")
     set(MVP_SODIUM_LIBS "${MVP_ANDROID_PREFIX}/lib/libsodium.a")
-    # Argon2 is NOT linked separately on Android: libsodium bundles the same
-    # phc-winner-argon2 code and exports the identical argon2* API, and
-    # linking both archives duplicates every symbol. libargon2's installed
-    # header (MVP_DEP_INCLUDE_DIRS) is still used for the core's includes.
-    set(MVP_ARGON2_LIBS "")
-    set(MVP_SQLCIPHER_LIBS "${MVP_ANDROID_PREFIX}/lib/libsqlcipher.a")
+    # libsodium bundles the same phc-winner-argon2 code, so both archives
+    # define the argon2* API; the core additionally needs argon2_error_message
+    # which only libargon2 exports. The definitions are identical, so both
+    # archives are linked and --allow-multiple-definition (see below) makes
+    # the linker keep the first, identical, definition.
+    set(MVP_ARGON2_LIBS "${MVP_ANDROID_PREFIX}/lib/libargon2.a")
+    set(MVP_SQLCIPHER_LIBS
+        "${MVP_ANDROID_PREFIX}/lib/libsqlcipher.a"
+        "${MVP_ANDROID_PREFIX}/lib/libcrypto.a"
+    )
     set(MVP_FFMPEG_LIBS
         "${MVP_ANDROID_PREFIX}/lib/libavformat.a"
         "${MVP_ANDROID_PREFIX}/lib/libavcodec.a"
@@ -60,6 +64,10 @@ elseif(ANDROID)
         "${MVP_ANDROID_PREFIX}/lib/libswresample.a"
     )
     set(MVP_DEP_INCLUDE_DIRS "${MVP_ANDROID_PREFIX}/include")
+    # libsodium and libargon2 both define the phc argon2* API (identical
+    # code); the first definition wins, which both sodium_init and the core's
+    # argon2_error_message need satisfied.
+    add_link_options(-Wl,--allow-multiple-definition)
 else()
     set(MVP_VCPKG_PREFIX "" CACHE INTERNAL "vcpkg install root (Windows only)" FORCE)
 endif()

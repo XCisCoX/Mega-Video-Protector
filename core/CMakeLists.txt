@@ -79,6 +79,11 @@ target_link_libraries(VideoVaultCore
         ${MVP_SQLCIPHER_LIBS}
         ${MVP_FFMPEG_LIBS}
 )
+if(ANDROID)
+    # sqlcipher's codec routes its diagnostics through Android's logcat API
+    # (bionic liblog); the static library carries the reference.
+    target_link_libraries(VideoVaultCore PRIVATE log)
+endif()
 
 target_compile_features(VideoVaultCore PUBLIC cxx_std_20)
 target_compile_definitions(VideoVaultCore PRIVATE SQLITE_HAS_CODEC)
