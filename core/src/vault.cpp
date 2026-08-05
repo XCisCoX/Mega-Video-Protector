@@ -247,11 +247,26 @@ public:
 Vault::Vault() noexcept
     : mutex_(std::make_unique<std::mutex>()) {}
 Vault::~Vault() = default;
-Vault::Vault(Vault&&) noexcept = default;
-Vault& Vault::operator=(Vault&&) noexcept = default;
+// Atomics are not movable, so the move operations move the members and copy
+// the lock-free unlocked mirror explicitly.
+Vault::Vault(Vault&& other) noexcept
+    : mutex_(std::move(other.mutex_)),
+      unlocked_(other.unlocked_.load()),
+      root_(std::move(other.root_)),
+      impl_(std::move(other.impl_)) {}
+Vault& Vault::operator=(Vault&& other) noexcept {
+    if (this != &other) {
+        mutex_ = std::move(other.mutex_);
+        unlocked_.store(other.unlocked_.load());
+        root_ = std::move(other.root_);
+        impl_ = std::move(other.impl_);
+    }
+    return *this;
+}
 
 Vault::Vault(std::filesystem::path root, std::unique_ptr<Impl> impl) noexcept
     : mutex_(std::make_unique<std::mutex>()),
+      unlocked_(impl != nullptr),
       root_(std::move(root)),
       impl_(std::move(impl)) {}
 
@@ -473,13 +488,16 @@ Result<bool> Vault::validate_password(
 }
 
 bool Vault::is_unlocked() const noexcept {
-    std::lock_guard<std::mutex> guard(*mutex_);
-    return impl_ != nullptr;
+    // Lock-free read: this is called from UI event paths on every input
+    // event; taking the mutex here would block the UI thread whenever a
+    // worker holds it for the duration of an import/restore file.
+    return unlocked_.load(std::memory_order_acquire);
 }
 
 void Vault::lock() noexcept {
     std::lock_guard<std::mutex> guard(*mutex_);
     impl_.reset();
+    unlocked_.store(false, std::memory_order_release);
 }
 
 const std::filesystem::path& Vault::root_path() const noexcept {

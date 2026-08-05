@@ -138,7 +138,14 @@ MainWindow::MainWindow(QWidget* parent)
 
     autoLockTimer_->setSingleShot(true);
     autoLockTimer_->setInterval(kAutoLockMilliseconds);
-    connect(autoLockTimer_, &QTimer::timeout, this, [this] { lockVault(); });
+    connect(autoLockTimer_, &QTimer::timeout, this, [this] {
+        // Never auto-lock in the middle of an import/restore/remove batch:
+        // lock() blocks on the vault mutex a worker currently holds and the
+        // batch would fail with "vault is locked".
+        if (!batchBusy_) {
+            lockVault();
+        }
+    });
     // Batch worker thread for imports/restores: the UI thread never blocks;
     // progress and completion arrive as queued signals.
     batchThread_ = new QThread(this);

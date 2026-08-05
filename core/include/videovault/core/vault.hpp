@@ -243,7 +243,6 @@ public:
 private:
     class Impl;
     explicit Vault(std::filesystem::path root, std::unique_ptr<Impl> impl) noexcept;
-    Vault(Vault&& other) noexcept;
 
     // Guards impl_ and all operations on it. Held by unique_ptr so the mutex
     // address is stable across Vault moves. Vault methods are safe to call

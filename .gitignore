@@ -1,6 +1,73 @@
+# ── Build output ──────────────────────────────────────────────────────────
+# CMake binary tree (out/build/vs2022-x64/...)
 /out/
-/.vs/
-/CMakeUserPresets.json
+/build/
+/cmake-build-*/
+CMakeCache.txt
+CMakeFiles/
+CMakeTmp/
+CTestTestfile.cmake
+DartConfiguration.tcl
+Testing/
+
+# vcpkg installed tree (a local copy; the real one lives outside the repo)
+/vcpkg_installed/
+
+# ── Visual Studio ────────────────────────────────────────────────────────
+# VS workspace cache / IntelliSense DB
+.vs/
+.vsconfig
 *.user
 *.suo
 *.VC.db
+*.VC.VC.opendb
+*.ncb
+*.sdf
+*.opensdf
+*.ipch
+x64/
+Debug/
+Release/
+ipch/
+
+# ── Editors / OS ──────────────────────────────────────────────────────────
+.vscode/
+.idea/
+*.swp
+*~
+.DS_Store
+Thumbs.db
+ehthumbs.db
+Desktop.ini
+$RECYCLE.BIN/
+
+# ── Qt generated sources (AUTOMOC/AUTOUIC/AUTORCC) ───────────────────────
+moc_*.cpp
+moc_*.h
+qrc_*.cpp
+ui_*.h
+*.moc
+mocs_compilation.cpp
+.qmake.stash
+
+# ── Compiler / linker artifacts ───────────────────────────────────────────
+*.obj
+*.o
+*.pdb
+*.ilk
+*.exe
+*.dll
+*.lib
+*.a
+*.so
+*.dylib
+*.exp
+*.idb
+*.tlog
+*.lastbuildstate
+
+# ── Tests / tooling logs ──────────────────────────────────────────────────
+*.log
+*.tmp
+*.core
+core.*
