@@ -15,6 +15,7 @@ class QLineEdit;
 class QListWidget;
 class QProgressBar;
 class QPushButton;
+class QThread;
 class QStackedWidget;
 class QTimer;
 class QEvent;
@@ -45,10 +46,7 @@ struct TagEditorData {
     std::vector<core::TagInfo> video_tags;
 };
 
-// Shared state for a batch operation (import/restore) running on the thread
-// pool: per-item progress, the success count, and the first error if any.
-// Lives in the .cpp; MainWindow methods take it by shared_ptr.
-struct ImportProgress;
+class BatchWorker;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -74,16 +72,14 @@ private:
     void beginImport();
     void beginImportFolder();
     void beginImportMany(std::vector<std::filesystem::path> sources);
-    void finishImport(std::shared_ptr<ImportProgress> progress);
+    void beginRestoreSelected();
+    void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
-    void beginRemoveSelected(std::int64_t video_id = -1);
-    void finishRemoveSelected();
+    void beginRemoveSelected();
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
-    void beginRestoreSelected();
-    void finishRestoreSelected(std::shared_ptr<ImportProgress> progress);
-    void beginGenerateThumbnail(std::int64_t video_id = -1);
+    void beginGenerateThumbnail(const std::vector<std::int64_t>& ids = {});
     void finishGenerateThumbnail();
     void beginPlayback(std::int64_t video_id);
     std::int64_t selectedVideoId() const;
@@ -135,12 +131,25 @@ private:
     std::int64_t tagFilterId_{-1};
     QString tagFilterName_;
     QString searchText_;
+    // Label for the in-progress batch status text ("Importing"/"Restoring").
+    QString batchLabel_;
+    // Monotonic epochs: refreshGallery/refreshTagFilter bump their own counter;
+    // async snapshots capture it at start and are DISCARDED when they land on
+    // a stale epoch. This stops a pre-delete snapshot from resurrecting a
+    // removed video after the remove's own refresh finished. Two counters so
+    // the tag filter and the gallery don't invalidate each other when they
+    // run as part of the same refresh cycle.
+    std::uint64_t galleryGeneration_{0};
+    std::uint64_t tagGeneration_{0};
     QTimer* autoLockTimer_{nullptr};
+    // Batch worker thread: imports/restores run off the UI thread and report
+    // progress through queued signals (never blocks the UI, no polling).
+    QThread* batchThread_{nullptr};
+    BatchWorker* batchWorker_{nullptr};
+    bool batchBusy_{false};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
-    QFutureWatcher<void>* importWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<bool>>>* adminWatcher_{nullptr};
-    QFutureWatcher<void>* restoreWatcher_{nullptr};
-    QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>* thumbnailWatcher_{nullptr};
+    QFutureWatcher<std::shared_ptr<core::Result<int>>>* thumbnailWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;

@@ -180,7 +180,8 @@ Result<PackageWriteResult> write_package_file(
     const SensitiveBuffer& file_key,
     const std::uint32_t chunk_size,
     std::istream& source,
-    const std::uint64_t plaintext_size) {
+    const std::uint64_t plaintext_size,
+    const std::function<void(double)>& progress) {
     if (file_key.size() != 32U) {
         return VaultError{VaultErrorCode::CryptoFailure, "invalid file key length"};
     }
@@ -254,6 +255,10 @@ Result<PackageWriteResult> write_package_file(
         }
         if (!write_all(ciphertext.value())) {
             return VaultError{VaultErrorCode::DatabaseFailure, "package chunk write failed"};
+        }
+        if (progress) {
+            progress(static_cast<double>(index + 1U)
+                / static_cast<double>(header.chunk_count));
         }
     }
 

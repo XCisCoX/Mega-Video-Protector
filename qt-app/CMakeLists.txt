@@ -12,10 +12,12 @@ add_executable(VideoVaultApp WIN32
     src/media_decoder.cpp
     src/player_window.cpp
     src/settings_dialog.cpp
+    src/batch_worker.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
     include/videovault/app/settings_dialog.hpp
+    include/videovault/app/batch_worker.hpp
 )
 
 target_include_directories(VideoVaultApp PRIVATE

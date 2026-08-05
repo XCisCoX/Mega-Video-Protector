@@ -48,7 +48,12 @@ regenerate() {
     {
         echo "LIBRARY $dll"
         echo "EXPORTS"
-        "$DUMPBIN" /exports "$dllpath" 2>/dev/null \
+        # NOTE: dash-prefixed switches ONLY. MSYS2/git-bash converts arguments
+        # that start with '/' into Windows paths for native tools (on GitHub
+        # runners, `/exports` became `C:\Program Files\Git\exports` and
+        # `/nologo` became `C:\Program Files\Git\nologo`). MSVC tools accept
+        # the '-switch' spelling, which MSYS2 leaves untouched.
+        "$DUMPBIN" -exports "$dllpath" 2>/dev/null \
             | awk '/^[[:space:]]*[0-9]+[[:space:]]+[0-9A-Fa-f]+[[:space:]]+[0-9A-Fa-f]+[[:space:]]+[A-Za-z_]/{ name=$4; sub(/=.*/, "", name); print name }' \
             | sort -u
     } > "$def"
@@ -56,9 +61,13 @@ regenerate() {
     local count
     count=$(grep -vc '^$' "$def")
     echo "$libname: $((count - 2)) exported symbols"
+    if [ "$count" -le 2 ]; then
+        echo "$libname: NO EXPORTED SYMBOLS — aborting (wrong DLL path?)"
+        exit 1
+    fi
 
-    "$LIBEXE" /nologo /machine:x64 "/def:$def" "/out:$libpath" \
-        > "$DEFDIR\\${libname}.log" 2>&1
+    "$LIBEXE" -nologo -machine:x64 "-def:$def" "-out:$libpath" \
+        > "$DEFDIR\\\\${libname}.log" 2>&1
     local status=$?
     if [ $status -ne 0 ] || [ ! -f "$libpath" ]; then
         echo "$libname: FAILED (status $status)"

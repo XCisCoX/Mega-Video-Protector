@@ -1,9 +1,9 @@
+#include "videovault/app/batch_worker.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/core/vault.hpp"
 
-#include <QtConcurrent/QtConcurrentMap>
 #include <QtConcurrent/QtConcurrentRun>
 
 #include <QApplication>
@@ -30,10 +30,12 @@
 #include <QMimeData>
 #include <QPixmap>
 #include <QProgressBar>
+#include <QMessageBox>
 #include <QPushButton>
 #include <QSet>
 #include <QSettings>
 #include <QStackedWidget>
+#include <QThread>
 #include <QTimer>
 #include <QUrl>
 #include <QTreeWidget>
@@ -121,17 +123,6 @@ core::Argon2Parameters selectedParameters(const int profile) {
 
 } // namespace
 
-// Batch-operation state shared between the thread pool and the UI: how many
-// items finished, how many succeeded, and the first error (if any).
-// Forward-declared in main_window.hpp; defined here at app scope.
-struct ImportProgress {
-    std::atomic<int> done{0};
-    std::atomic<int> succeeded{0};
-    std::atomic<bool> failed{false};
-    std::mutex error_mutex;
-    core::VaultError first_error;
-};
-
 struct VaultOperationResult {
     bool succeeded{false};
     std::unique_ptr<core::Vault> vault;
@@ -148,6 +139,29 @@ MainWindow::MainWindow(QWidget* parent)
     autoLockTimer_->setSingleShot(true);
     autoLockTimer_->setInterval(kAutoLockMilliseconds);
     connect(autoLockTimer_, &QTimer::timeout, this, [this] { lockVault(); });
+    // Batch worker thread for imports/restores: the UI thread never blocks;
+    // progress and completion arrive as queued signals.
+    batchThread_ = new QThread(this);
+    batchWorker_ = new BatchWorker();
+    batchWorker_->moveToThread(batchThread_);
+    connect(batchThread_, &QThread::finished, batchWorker_, &QObject::deleteLater);
+    connect(batchWorker_, &BatchWorker::progress, this,
+        [this](const qlonglong done, const qlonglong total) {
+            if (progressBar_ != nullptr && total > 0) {
+                progressBar_->setRange(0, 1000);
+                progressBar_->setValue(static_cast<int>((done * 1000) / total));
+            }
+        });
+    connect(batchWorker_, &BatchWorker::fileFinished, this,
+        [this](const int done, const int total) {
+            galleryStatus_->setText(QStringLiteral("%1 %2 / %3…")
+                .arg(batchLabel_, QString::number(done), QString::number(total)));
+        });
+    connect(batchWorker_, &BatchWorker::finished, this,
+        [this](const bool ok, const QString& message, const int count) {
+            finishBatch(ok, message, count);
+        });
+    batchThread_->start();
     qApp->installEventFilter(this);
 
     buildInterface();
@@ -163,8 +177,11 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
-    if (importWatcher_ != nullptr) {
-        importWatcher_->waitForFinished();
+    // Stop the batch worker before the vault goes away: quit the event loop,
+    // then wait for the current batch item to finish (bounded).
+    if (batchThread_ != nullptr) {
+        batchThread_->quit();
+        batchThread_->wait(5000);
     }
     if (adminWatcher_ != nullptr) {
         adminWatcher_->waitForFinished();
@@ -471,13 +488,14 @@ void MainWindow::refreshTagFilter() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
+    const auto generation = ++tagGeneration_;
     const auto vault = vault_;
     auto* watcher =
         new QFutureWatcher<std::shared_ptr<core::Result<std::vector<core::TagInfo>>>>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, vault, watcher] {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, generation, vault, watcher] {
         const auto outcome = *watcher->result();
         watcher->deleteLater();
-        if (vault_ != vault) {
+        if (generation != tagGeneration_ || vault_ != vault) {
             return;
         }
         const std::int64_t previous = tagFilterId_;
@@ -701,9 +719,10 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
         }
         beginRestoreSelected();
     } else if (chosen == regenerate) {
-        beginGenerateThumbnail(video_id);
+        // Operate on the whole selection (multi-select supported).
+        beginGenerateThumbnail();
     } else if (chosen == remove) {
-        beginRemoveSelected(video_id);
+        beginRemoveSelected();
     }
 }
 
@@ -868,68 +887,43 @@ void MainWindow::beginImportFolder() {
 }
 
 void MainWindow::beginImportMany(std::vector<std::filesystem::path> sources) {
-    if (!vault_ || !vault_->is_unlocked()) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Importing");
     setError(galleryStatus_, {});
     const auto vault = vault_;
     const auto shared_sources =
         std::make_shared<std::vector<std::filesystem::path>>(std::move(sources));
-    const auto progress = std::make_shared<ImportProgress>();
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
     settingsButton_->setEnabled(false);
     galleryStatus_->setText(QStringLiteral("Importing…"));
     galleryStatus_->setVisible(true);
-    progressBar_->setRange(0, static_cast<int>(shared_sources->size()));
+    progressBar_->setRange(0, 1000);
     progressBar_->setValue(0);
     progressBar_->show();
-    importWatcher_ = new QFutureWatcher<void>(this);
-    connect(importWatcher_, &QFutureWatcherBase::finished,
-        this, [this, progress] { finishImport(progress); });
-    connect(importWatcher_, &QFutureWatcherBase::progressValueChanged,
-        this, [this](const int value) { progressBar_->setValue(value); });
-    importWatcher_->setFuture(QtConcurrent::map(
-        shared_sources->begin(), shared_sources->end(),
-        [vault, progress](const std::filesystem::path& source) {
-            if (!progress->failed.load()) {
-                auto outcome = vault->import_file(source);
-                if (!outcome) {
-                    std::lock_guard<std::mutex> guard(progress->error_mutex);
-                    if (!progress->failed.load()) {
-                        progress->first_error = outcome.error();
-                        progress->failed.store(true);
-                    }
-                } else {
-                    ++progress->succeeded;
-                }
-            }
-            ++progress->done;
-        }));
+    // Run on the batch worker thread; progress/completion arrive as queued
+    // signals so the UI stays fully responsive during the import.
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, sources = std::move(shared_sources)] {
+            worker->importFiles(sources, vault);
+        },
+        Qt::QueuedConnection);
 }
 
-void MainWindow::finishImport(std::shared_ptr<ImportProgress> progress) {
-    auto* completed = importWatcher_;
-    importWatcher_ = nullptr;
-    completed->deleteLater();
+void MainWindow::finishBatch(const bool ok, const QString& message, const int count) {
+    batchBusy_ = false;
     importButton_->setEnabled(true);
     importFolderButton_->setEnabled(true);
     settingsButton_->setEnabled(true);
     progressBar_->hide();
-
-    if (progress->failed.load()) {
-        core::VaultError error;
-        {
-            std::lock_guard<std::mutex> guard(progress->error_mutex);
-            error = progress->first_error;
-        }
-        const QString message =
-            QString::fromUtf8(core::user_message(error.code).data());
+    if (!ok) {
         setError(galleryStatus_, message);
         return;
     }
-    galleryStatus_->setText(QStringLiteral("Imported %1 video(s).")
-        .arg(progress->succeeded.load()));
+    galleryStatus_->setText(message);
     galleryStatus_->setVisible(true);
     refreshTagFilter();
     refreshGallery();
@@ -950,12 +944,15 @@ void MainWindow::openSettings() {
 }
 
 void MainWindow::beginRestoreSelected() {
-    if (!vault_ || !vault_->is_unlocked()) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Restoring");
     setError(galleryStatus_, {});
     const auto ids = selectedVideoIds();
     if (ids.empty()) {
+        batchBusy_ = false;
         setError(galleryStatus_, QStringLiteral("Select one or more videos to restore."));
         galleryStatus_->setVisible(true);
         return;
@@ -964,66 +961,27 @@ void MainWindow::beginRestoreSelected() {
         this, QStringLiteral("Restore selected videos to folder"), {},
         QFileDialog::ShowDirsOnly | QFileDialog::DontResolveSymlinks);
     if (target.isEmpty()) {
+        batchBusy_ = false;
         return;
     }
     const auto vault = vault_;
     const auto shared_ids = std::make_shared<std::vector<std::int64_t>>(ids);
     const auto shared_dir = std::make_shared<std::filesystem::path>(pathFromText(target));
-    const auto progress = std::make_shared<ImportProgress>();
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
     settingsButton_->setEnabled(false);
     galleryStatus_->setText(QStringLiteral("Restoring…"));
     galleryStatus_->setVisible(true);
-    progressBar_->setRange(0, static_cast<int>(shared_ids->size()));
+    progressBar_->setRange(0, 1000);
     progressBar_->setValue(0);
     progressBar_->show();
-    restoreWatcher_ = new QFutureWatcher<void>(this);
-    connect(restoreWatcher_, &QFutureWatcherBase::finished,
-        this, [this, progress] { finishRestoreSelected(progress); });
-    connect(restoreWatcher_, &QFutureWatcherBase::progressValueChanged,
-        this, [this](const int value) { progressBar_->setValue(value); });
-    restoreWatcher_->setFuture(QtConcurrent::map(
-        shared_ids->begin(), shared_ids->end(),
-        [vault, shared_dir, progress](const std::int64_t video_id) {
-            if (!progress->failed.load()) {
-                auto outcome = vault->restore_video(video_id, *shared_dir);
-                if (!outcome) {
-                    std::lock_guard<std::mutex> guard(progress->error_mutex);
-                    if (!progress->failed.load()) {
-                        progress->first_error = outcome.error();
-                        progress->failed.store(true);
-                    }
-                } else {
-                    ++progress->succeeded;
-                }
-            }
-            ++progress->done;
-        }));
-}
-
-void MainWindow::finishRestoreSelected(std::shared_ptr<ImportProgress> progress) {
-    auto* completed = restoreWatcher_;
-    restoreWatcher_ = nullptr;
-    completed->deleteLater();
-    importButton_->setEnabled(true);
-    importFolderButton_->setEnabled(true);
-    settingsButton_->setEnabled(true);
-    progressBar_->hide();
-    if (progress->failed.load()) {
-        core::VaultError error;
-        {
-            std::lock_guard<std::mutex> guard(progress->error_mutex);
-            error = progress->first_error;
-        }
-        const QString message =
-            QString::fromUtf8(core::user_message(error.code).data());
-        setError(galleryStatus_, message);
-        return;
-    }
-    galleryStatus_->setText(QStringLiteral("Restored %1 video(s).")
-        .arg(progress->succeeded.load()));
-    galleryStatus_->setVisible(true);
+    // Run on the batch worker thread; progress/completion arrive as queued
+    // signals so the UI stays fully responsive during the restore.
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, ids = std::move(shared_ids), dir = std::move(shared_dir)] {
+            worker->restoreVideos(ids, dir, vault);
+        },
+        Qt::QueuedConnection);
 }
 
 std::vector<std::int64_t> MainWindow::selectedVideoIds() const {
@@ -1082,10 +1040,14 @@ void MainWindow::refreshGallery() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
+    const auto generation = ++galleryGeneration_;
     const auto vault = vault_;
     auto* watcher = new QFutureWatcher<std::vector<core::VideoInfo>>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, vault, watcher] {
-        if (vault_ != vault || !vault_->is_unlocked()) {
+    connect(watcher, &QFutureWatcherBase::finished, this, [this, generation, vault, watcher] {
+        if (generation != galleryGeneration_ || vault_ != vault
+            || !vault_->is_unlocked()) {
+            // A newer refresh superseded this snapshot (e.g. a delete landed
+            // mid-list); publishing it would resurrect removed videos.
             watcher->deleteLater();
             return;
         }
@@ -1258,43 +1220,44 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
     window->show();
 }
 
-void MainWindow::beginRemoveSelected(const std::int64_t video_id) {
-    if (!vault_ || !vault_->is_unlocked()) {
+void MainWindow::beginRemoveSelected() {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
-    const auto target = video_id >= 0 ? video_id : selectedVideoId();
-    if (target < 0) {
-        setError(galleryStatus_, QStringLiteral("Select a video to remove."));
+    setError(galleryStatus_, {});
+    const auto ids = selectedVideoIds();
+    if (ids.empty()) {
+        setError(galleryStatus_, QStringLiteral("Select one or more videos to remove."));
         galleryStatus_->setVisible(true);
         return;
     }
+    const auto confirm = QMessageBox::question(
+        this, QStringLiteral("Remove videos"),
+        QStringLiteral("Remove %1 video(s) from the vault? This cannot be undone.")
+            .arg(ids.size()),
+        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+    if (confirm != QMessageBox::Yes) {
+        return;
+    }
+    batchBusy_ = true;
+    batchLabel_ = QStringLiteral("Removing");
     const auto vault = vault_;
+    const auto shared_ids = std::make_shared<std::vector<std::int64_t>>(ids);
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
     settingsButton_->setEnabled(false);
-    adminWatcher_ = new QFutureWatcher<std::shared_ptr<core::Result<bool>>>(this);
-    connect(adminWatcher_, &QFutureWatcherBase::finished, this, [this] { finishRemoveSelected(); });
-    adminWatcher_->setFuture(QtConcurrent::run([vault, target] {
-        return std::make_shared<core::Result<bool>>(vault->remove_video(target));
-    }));
-}
-
-void MainWindow::finishRemoveSelected() {
-    auto* completed = adminWatcher_;
-    adminWatcher_ = nullptr;
-    const auto outcome = *completed->result();
-    completed->deleteLater();
-    importButton_->setEnabled(true);
-    importFolderButton_->setEnabled(true);
-    settingsButton_->setEnabled(true);
-    if (!outcome) {
-        const QString message =
-            QString::fromUtf8(core::user_message(outcome.error().code).data());
-        setError(galleryStatus_, message);
-        return;
-    }
-    refreshTagFilter();
-    refreshGallery();
+    galleryStatus_->setText(QStringLiteral("Removing…"));
+    galleryStatus_->setVisible(true);
+    progressBar_->setRange(0, 1000);
+    progressBar_->setValue(0);
+    progressBar_->show();
+    // Run on the batch worker thread; progress/completion arrive as queued
+    // signals so the UI stays fully responsive during the removal.
+    QMetaObject::invokeMethod(batchWorker_,
+        [worker = batchWorker_, vault, ids = std::move(shared_ids)] {
+            worker->removeVideos(ids, vault);
+        },
+        Qt::QueuedConnection);
 }
 
 void MainWindow::beginChangePassword() {
@@ -1377,29 +1340,39 @@ void MainWindow::finishChangePassword() {
     galleryStatus_->setVisible(true);
 }
 
-void MainWindow::beginGenerateThumbnail(const std::int64_t video_id) {
+void MainWindow::beginGenerateThumbnail(const std::vector<std::int64_t>& ids) {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
-    const auto target = video_id >= 0 ? video_id : selectedVideoId();
-    if (target < 0) {
-        setError(galleryStatus_, QStringLiteral("Select a video to thumbnail."));
+    auto targets = ids;
+    if (targets.empty()) {
+        targets = selectedVideoIds();
+    }
+    if (targets.empty()) {
+        setError(galleryStatus_, QStringLiteral("Select one or more videos to thumbnail."));
         galleryStatus_->setVisible(true);
         return;
     }
     const auto vault = vault_;
+    const auto shared_ids = std::make_shared<std::vector<std::int64_t>>(std::move(targets));
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
     settingsButton_->setEnabled(false);
-    galleryStatus_->setText(QStringLiteral("Generating thumbnail…"));
+    galleryStatus_->setText(QStringLiteral("Generating thumbnails…"));
     galleryStatus_->setVisible(true);
     thumbnailWatcher_ =
-        new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
+        new QFutureWatcher<std::shared_ptr<core::Result<int>>>(this);
     connect(thumbnailWatcher_, &QFutureWatcherBase::finished, this,
         [this] { finishGenerateThumbnail(); });
-    thumbnailWatcher_->setFuture(QtConcurrent::run([vault, target] {
-        return std::make_shared<core::Result<core::ThumbnailInfo>>(
-            vault->generate_thumbnail(target, 320U));
+    thumbnailWatcher_->setFuture(QtConcurrent::run([vault, shared_ids] {
+        int regenerated = 0;
+        for (const auto video_id : *shared_ids) {
+            auto outcome = vault->generate_thumbnail(video_id, 320U);
+            if (outcome) {
+                ++regenerated;
+            }
+        }
+        return std::make_shared<core::Result<int>>(regenerated);
     }));
 }
 
@@ -1417,6 +1390,9 @@ void MainWindow::finishGenerateThumbnail() {
         setError(galleryStatus_, message);
         return;
     }
+    galleryStatus_->setText(
+        QStringLiteral("Regenerated %1 thumbnail(s).").arg(outcome.value()));
+    galleryStatus_->setVisible(true);
     refreshGallery();
 }
 

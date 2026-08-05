@@ -2,6 +2,7 @@
 
 #include <array>
 #include <cstdint>
+#include <functional>
 #include <filesystem>
 #include <memory>
 #include <mutex>
@@ -142,8 +143,11 @@ public:
     // Phase 3: import and gallery.
     // Imports an opaque file as an encrypted package and records it in the
     // vault database. Identical content re-imports return the existing id.
+    // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
+    // file processed, called from the importing thread.
     [[nodiscard]] Result<std::int64_t> import_file(
-        const std::filesystem::path& source_path);
+        const std::filesystem::path& source_path,
+        const std::function<void(double)>& progress = {});
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 
@@ -227,9 +231,12 @@ public:
     // Restores a video to plaintext: streams the decrypted bytes to
     // `target_dir / <original name>` in chunks (no whole-file buffer) and
     // returns the written path. Overwrites an existing file of the same name.
+    // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
+    // package processed, called from the restoring thread.
     [[nodiscard]] Result<std::filesystem::path> restore_video(
         std::int64_t video_id,
-        const std::filesystem::path& target_dir);
+        const std::filesystem::path& target_dir,
+        const std::function<void(double)>& progress = {});
 
 private:
     class Impl;

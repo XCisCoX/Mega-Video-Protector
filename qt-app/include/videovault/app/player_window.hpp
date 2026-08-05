@@ -7,12 +7,14 @@
 #include <QDialog>
 #include <QImage>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QPainter>
 #include <QPushButton>
 #include <QSize>
 #include <QSlider>
 #include <QTimer>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <memory>

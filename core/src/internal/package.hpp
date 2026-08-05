@@ -6,6 +6,7 @@
 #include <cstdint>
 #include <filesystem>
 #include <fstream>
+#include <functional>
 #include <istream>
 #include <limits>
 #include <span>
@@ -63,13 +64,15 @@ serialize_package_header(const PackageHeader& header);
 
 // Streams the source into an encrypted package at `destination`. The complete
 // ciphertext is hashed incrementally with SHA-256. `plaintext_size` must match
-// the bytes actually available in `source`.
+// the bytes actually available in `source`. `progress`, when given, receives a
+// monotonic 0.0..1.0 fraction per completed chunk.
 [[nodiscard]] Result<PackageWriteResult> write_package_file(
     const std::filesystem::path& destination,
     const SensitiveBuffer& file_key,
     std::uint32_t chunk_size,
     std::istream& source,
-    std::uint64_t plaintext_size);
+    std::uint64_t plaintext_size,
+    const std::function<void(double)>& progress = {});
 
 // Reads and authenticates the whole package, returning the plaintext.
 [[nodiscard]] Result<std::vector<unsigned char>> read_package_content(

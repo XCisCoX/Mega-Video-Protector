@@ -127,7 +127,7 @@ PlayerWindow::PlayerWindow(
     volumeSlider_->setFixedWidth(110);
     auto* cacheLabel = new QLabel(QStringLiteral("Cache:"), controlsBar_);
     cacheCombo_ = new QComboBox(controlsBar_);
-    const std::vector<std::pair<QString, int>> cache_options = {
+    const std::vector<std::pair<QString, int>> cache_options{
         {QStringLiteral("4 MB"), 4}, {QStringLiteral("8 MB"), 8},
         {QStringLiteral("16 MB"), 16}, {QStringLiteral("32 MB"), 32},
         {QStringLiteral("64 MB"), 64}, {QStringLiteral("128 MB"), 128}};

@@ -491,7 +491,9 @@ Argon2Parameters Vault::kdf_parameters() const noexcept {
     return impl_ != nullptr ? impl_->parameters_ : Argon2Parameters{};
 }
 
-Result<std::int64_t> Vault::import_file(const std::filesystem::path& source_path) {
+Result<std::int64_t> Vault::import_file(
+    const std::filesystem::path& source_path,
+    const std::function<void(double)>& progress) {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
@@ -538,7 +540,8 @@ Result<std::int64_t> Vault::import_file(const std::filesystem::path& source_path
             "unable to open the source file"};
     }
     auto written = internal::write_package_file(
-        staging_package, file_key, internal::kDefaultPackageChunkSize, source, source_size);
+        staging_package, file_key, internal::kDefaultPackageChunkSize, source,
+        source_size, progress);
     if (!written) {
         std::error_code ignored;
         std::filesystem::remove(staging_package, ignored);
@@ -911,7 +914,8 @@ Result<bool> Vault::delete_tag(const std::int64_t tag_id) {
 
 Result<std::filesystem::path> Vault::restore_video(
     const std::int64_t video_id,
-    const std::filesystem::path& target_dir) {
+    const std::filesystem::path& target_dir,
+    const std::function<void(double)>& progress) {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
@@ -964,6 +968,11 @@ Result<std::filesystem::path> Vault::restore_video(
                 "failed while writing the restore file"};
         }
         offset += got.value();
+        if (progress) {
+            const auto total = row_result.value().original_size;
+            progress(total == 0U ? 1.0
+                : static_cast<double>(offset) / static_cast<double>(total));
+        }
     }
     out.close();
     if (!out) {

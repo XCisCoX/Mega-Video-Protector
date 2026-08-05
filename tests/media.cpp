@@ -210,6 +210,29 @@ int main() {
     if (!created) {
         return fail("Creating a vault for media tests must succeed.");
     }
+    // The optional progress callback must fire with a monotonic 0.0..1.0
+    // fraction as the file is encrypted.
+    {
+        double last = -1.0;
+        bool saw_final = false;
+        bool monotonic = true;
+        const auto progressed = created.value().import_file(
+            fixture, [&](const double fraction) {
+                if (fraction < last - 1e-9 || fraction < 0.0 || fraction > 1.0) {
+                    monotonic = false;
+                }
+                last = fraction;
+                if (fraction >= 1.0) {
+                    saw_final = true;
+                }
+            });
+        if (!progressed) {
+            return fail("Re-import with a progress callback must succeed.");
+        }
+        if (!monotonic || !saw_final) {
+            return fail("The import progress callback must be monotonic and reach 1.0.");
+        }
+    }
     const auto imported = created.value().import_file(fixture);
     if (!imported) {
         return fail("Importing the media fixture must succeed.");
