@@ -40,8 +40,10 @@ struct VaultOperationResult;
 class PlayerWindow;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
+// Holds every selected video when the user edits tags on a multi-selection;
+// video_tags is the tag set shared by ALL of them (the dialog's checked set).
 struct TagEditorData {
-    std::int64_t video_id{0};
+    std::vector<std::int64_t> video_ids;
     std::vector<core::TagInfo> all_tags;
     std::vector<core::TagInfo> video_tags;
 };
@@ -86,7 +88,7 @@ private:
     std::vector<std::int64_t> selectedVideoIds() const;
     void setViewMode(int index);
     void refreshTagFilter();
-    void beginEditTags(std::int64_t video_id);
+    void beginEditTags(const std::vector<std::int64_t>& video_ids);
     void finishEditTags();
     void showGalleryContextMenu(const QPoint& position);
     void setBusy(bool busy);

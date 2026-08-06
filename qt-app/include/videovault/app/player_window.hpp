@@ -5,6 +5,8 @@
 #include <QAudioOutput>
 #include <QColor>
 #include <QDialog>
+#include <QFontMetrics>
+#include <QFrame>
 #include <QImage>
 #include <QLabel>
 #include <QMouseEvent>
@@ -70,6 +72,15 @@ public:
         update();
     }
 
+    // Image-viewer view transform: zoom <= 0 means aspect-fit; otherwise the
+    // image is drawn at `zoom` image-pixels-per-widget-pixel with its top-left
+    // at `offset`.
+    void setView(const double zoom, const QPointF& offset) {
+        zoom_ = zoom;
+        offset_ = offset;
+        update();
+    }
+
     void setText(const QString& text) {
         text_ = text;
         frame_ = QImage();
@@ -93,12 +104,18 @@ protected:
         QPainter painter(this);
         painter.fillRect(rect(), Qt::black);
         if (!frame_.isNull()) {
-            const QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
-            const QRect target(
-                QPoint((width() - fitted.width()) / 2, (height() - fitted.height()) / 2),
-                fitted);
-            painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
-            painter.drawImage(target, frame_);
+            if (zoom_ > 0.0) {
+                // Image-viewer mode: draw at the zoom scale with the pan offset.
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+                painter.drawImage(QRectF(offset_, QSizeF(frame_.size()) * zoom_), frame_);
+            } else {
+                const QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
+                const QRect target(
+                    QPoint((width() - fitted.width()) / 2, (height() - fitted.height()) / 2),
+                    fitted);
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                painter.drawImage(target, frame_);
+            }
             if (!overlayText_.isEmpty()) {
                 // Transient message band at the bottom of the picture.
                 const QRect band(0, height() - 34, width(), 34);
@@ -116,28 +133,115 @@ private:
     QImage frame_;
     QString text_;
     QString overlayText_;
+    double zoom_{0.0};
+    QPointF offset_;
 };
 
-// Seek slider that jumps to the exact clicked position (instead of QSlider's
-// default "page step" nudge), then drags normally from there.
+// Modern seek bar: a thin rounded track that thickens on hover, an
+// accent-colored played portion, a round handle while hovering/dragging, and
+// a time bubble above the cursor showing the position it would jump to.
+// Jumps to the exact clicked position instead of QSlider's default "page
+// step" nudge, then drags normally from there.
 class SeekSlider final : public QSlider {
     Q_OBJECT
 public:
     explicit SeekSlider(QWidget* parent = nullptr)
-        : QSlider(Qt::Horizontal, parent) {}
+        : QSlider(Qt::Horizontal, parent) {
+        setMouseTracking(true);
+        setCursor(Qt::PointingHandCursor);
+    }
 
 protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const bool active = hovered_ || isSliderDown();
+        const int track_h = active ? 6 : 3;
+        const int track_y = (height() - track_h) / 2;
+        const double fraction = maximum() > minimum()
+            ? static_cast<double>(value() - minimum())
+                / static_cast<double>(maximum() - minimum())
+            : 0.0;
+        const int fill_w = static_cast<int>(width() * fraction);
+
+        // Base track and played portion.
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(255, 255, 255, 46));
+        painter.drawRoundedRect(QRect(0, track_y, width(), track_h), track_h / 2, track_h / 2);
+        if (fill_w > 0) {
+            painter.setBrush(QColor(91, 124, 250));
+            painter.drawRoundedRect(QRect(0, track_y, fill_w, track_h), track_h / 2, track_h / 2);
+        }
+
+        if (active && maximum() > minimum()) {
+            const int handle_x = static_cast<int>(width() * fraction);
+            // Round handle.
+            painter.setBrush(QColor(255, 255, 255));
+            painter.drawEllipse(QPointF(handle_x, height() / 2.0), 7.0, 7.0);
+            // Time bubble above the cursor.
+            const int shown_ms = isSliderDown() ? value() : hoverMs_;
+            const QString time_text = formatSliderTime(shown_ms);
+            const QFontMetrics fm(font());
+            const int bubble_w = fm.horizontalAdvance(time_text) + 16;
+            const int bubble_h = fm.height() + 8;
+            const int bubble_x = std::clamp(handle_x - bubble_w / 2, 2, width() - bubble_w - 2);
+            const QRect bubble(bubble_x, 1, bubble_w, bubble_h);
+            painter.setBrush(QColor(18, 22, 30, 235));
+            painter.setPen(QPen(QColor(255, 255, 255, 70), 1));
+            painter.drawRoundedRect(bubble, 6, 6);
+            painter.setPen(QColor(238, 242, 248));
+            painter.drawText(bubble, Qt::AlignCenter, time_text);
+        }
+    }
+
+    void mouseMoveEvent(QMouseEvent* event) override {
+        hovered_ = true;
+        if (maximum() > minimum()) {
+            const double fraction = std::clamp(
+                static_cast<double>(event->pos().x())
+                    / static_cast<double>(std::max(1, width())),
+                0.0, 1.0);
+            hoverMs_ = minimum() + static_cast<int>(fraction * (maximum() - minimum()));
+        }
+        update();
+        QSlider::mouseMoveEvent(event);
+    }
+
+    void leaveEvent(QEvent* event) override {
+        hovered_ = false;
+        hoverMs_ = value();
+        update();
+        QSlider::leaveEvent(event);
+    }
+
     void mousePressEvent(QMouseEvent* event) override {
         if (event->button() == Qt::LeftButton && maximum() > minimum()) {
             const double fraction = std::clamp(
                 static_cast<double>(event->pos().x())
                     / static_cast<double>(std::max(1, width())),
                 0.0, 1.0);
-            setValue(minimum()
-                + static_cast<int>(fraction * (maximum() - minimum())));
+            setValue(minimum() + static_cast<int>(fraction * (maximum() - minimum())));
         }
         QSlider::mousePressEvent(event);
     }
+
+private:
+    static QString formatSliderTime(const int ms) {
+        const int total = std::max(0, ms) / 1000;
+        const int hours = total / 3600;
+        const int minutes = (total % 3600) / 60;
+        const int seconds = total % 60;
+        if (hours > 0) {
+            return QStringLiteral("%1:%2:%3")
+                .arg(hours).arg(minutes, 2, 10, QLatin1Char('0'))
+                .arg(seconds, 2, 10, QLatin1Char('0'));
+        }
+        return QStringLiteral("%1:%2")
+            .arg(minutes).arg(seconds, 2, 10, QLatin1Char('0'));
+    }
+
+    bool hovered_{false};
+    int hoverMs_{0};
 };
 
 // PotPlayer-style window with a worker-thread decode pipeline: the worker
@@ -175,9 +279,18 @@ private:
     void toggleFullscreen();
     bool handleKey(QKeyEvent* event);
     void applyVolume();
-    void showControls();
-    void hideControls();
+    void showChrome();
+    void hideChrome();
+    void layoutChrome();
+    void updateCenterButton();
+    void showVolumePopup();
+    void enterImageMode();
+    void zoomImage(double factor, const QPointF& cursor_pos);
+    void resetImageFit();
+    void setImageZoom100();
+    void updateZoomLabel();
     void tick();
+    void fitToVideoSize();
     void updatePositionLabel();
     QString formatTime(std::int64_t ms) const;
 
@@ -186,14 +299,27 @@ private:
     MediaDecoder decoder_;
 
     VideoSurface* surface_{nullptr};
-    QWidget* controlsBar_{nullptr};
+    // Overlay chrome drawn on top of the video (direct children of the
+    // surface so the empty video area keeps its own mouse handling).
+    QWidget* topOverlay_{nullptr};
+    QLabel* titleLabel_{nullptr};
+    QWidget* controlsOverlay_{nullptr};
+    QPushButton* centerPlayButton_{nullptr};
+    bool chromeVisible_{true};
     QPushButton* playButton_{nullptr};
     QSlider* positionSlider_{nullptr};
     QLabel* positionLabel_{nullptr};
     QPushButton* muteButton_{nullptr};
     QSlider* volumeSlider_{nullptr};
+    QFrame* volumePopup_{nullptr};
+    QTimer volumeHideTimer_;
     QComboBox* cacheCombo_{nullptr};
     QPushButton* fullscreenButton_{nullptr};
+    // Image-viewer chrome (shown instead of the playback row for images).
+    QPushButton* zoomOutButton_{nullptr};
+    QLabel* zoomLabel_{nullptr};
+    QPushButton* zoomInButton_{nullptr};
+    QPushButton* fitButton_{nullptr};
 
     // Audio device (UI thread only).
     AudioSink* audioSink_{nullptr};
@@ -218,6 +344,10 @@ private:
     std::atomic<int> audioSampleRate_{0};
     std::atomic<int> audioChannels_{0};
     std::atomic<bool> audioReady_{false};
+    // Video pixel dimensions reported by the decoder once open succeeds
+    // (worker writes; the UI reads them once to fit the window to the video).
+    std::atomic<int> videoWidth_{0};
+    std::atomic<int> videoHeight_{0};
 
     // Frame slot (worker writes, UI reads on its timer).
     std::mutex frameMutex_;
@@ -242,7 +372,17 @@ private:
 
     bool fullscreen_{false};
     bool muted_{false};
-    bool clickSeekPending_{false};
+    bool clickPending_{false};
+    bool autoSized_{false};
+    bool playIconPlaying_{true};
+    bool imageMode_{false};
+    std::atomic<bool> imageModeFlag_{false};
+    bool panning_{false};
+    QPoint panStartPos_;
+    QPointF panStartOffset_;
+    double imageZoom_{0.0};
+    QPointF imageOffset_;
+    QString title_;
     int volumePercent_{100};
     QImage lastFrame_;
 };

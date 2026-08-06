@@ -14,15 +14,39 @@ extern "C" {
 
 #include <algorithm>
 #include <cstdint>
+#include <cstdio>
 #include <memory>
 #include <string>
 #include <utility>
+
+#if defined(_WIN32)
+#ifndef NOMINMAX
+#define NOMINMAX
+#endif
+#include <windows.h>
+#endif
 
 namespace videovault::core::internal {
 namespace {
 
 constexpr std::size_t kAvioBufferSize = 64U * 1024U;
 constexpr std::int64_t kMaxDecodePackets = 400;
+
+// Debug aid for thumbnail position. Debug builds write to stderr (visible when
+// the app is run from a console/terminal) and, on Windows, to the debugger
+// (VS Output window, DebugView) via OutputDebugStringA — a GUI binary started
+// from Explorer has no visible console, so stderr alone would be lost.
+// Compiled out of Release builds.
+void debug_log_thumbnail(const char* message) {
+#if !defined(NDEBUG)
+    std::fprintf(stderr, "[thumbnail] %s\n", message);
+#if defined(_WIN32)
+    OutputDebugStringA(message);
+#endif
+#else
+    (void)message;
+#endif
+}
 
 VaultError media_error(const char* operation, const int status) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -130,6 +154,11 @@ Result<FormatHandle> open_format(PackageReader& reader) {
     }
     FormatHandle handle;
     handle.io.reset(raw_io);
+    // avio_alloc_context zeroes `seekable`; without this flag FFmpeg refuses
+    // every avio_seek (AVERROR(ENOSYS)), so avformat_seek_file always failed
+    // and thumbnails silently fell back to the first frame. The reader's seek
+    // callback (seek_packet) is fully functional — advertise it.
+    raw_io->seekable = AVIO_SEEKABLE_NORMAL;
 
     AVFormatContext* raw_format = avformat_alloc_context();
     if (raw_format == nullptr) {
@@ -200,20 +229,57 @@ Result<AVStream*> find_video_stream(AVFormatContext* format) {
     return stream;
 }
 
-// Seeks to roughly 10% into the stream (capped at 10 seconds) and decodes the
-// next video frame.
+// Seeks to roughly 30% into the stream and decodes the next video frame.
 Result<AvFramePtr> decode_representative_frame(
     AVFormatContext* format,
     AVStream* stream) {
     const auto duration = duration_milliseconds(format, stream);
-    const auto target_ms = std::min<std::uint64_t>(duration / 10U, 10000U);
+    // Single-frame media (images) have no "30% of the video": the only frame
+    // is the first one, and seeking a single-frame demuxer can misbehave
+    // (FFmpeg's image2 demuxer reports ~40 ms for one frame), so skip the
+    // seek entirely and decode the first frame.
+    const bool single_frame = duration <= 1000U;
+    const auto target_ms = single_frame ? 0U : (duration * 3U / 10U);
+    char debug[256];
+    if (single_frame) {
+        debug_log_thumbnail(
+            "single-frame media (image): using the first frame (no seek)");
+    } else {
+        std::snprintf(debug, sizeof(debug),
+            "duration %llu ms, thumbnail target %.3f s (30%% of the video)",
+            static_cast<unsigned long long>(duration),
+            static_cast<double>(target_ms) / 1000.0);
+        debug_log_thumbnail(debug);
+    }
     const auto target_ts = av_rescale_q(
         static_cast<std::int64_t>(target_ms), AV_TIME_BASE_Q, stream->time_base);
-    const int seek_status = avformat_seek_file(
-        format, stream->index, INT64_MIN, target_ts, target_ts, 0);
-    if (seek_status < 0) {
-        // Some containers do not support seeking; fall back to the start.
-        (void)avformat_seek_file(format, stream->index, INT64_MIN, 0, 0, 0);
+    int seek_status = 0;
+    if (!single_frame) {
+        std::snprintf(debug, sizeof(debug), "avio position before seek: %lld",
+            static_cast<long long>(format->pb != nullptr ? format->pb->pos : -1));
+        debug_log_thumbnail(debug);
+        seek_status = avformat_seek_file(
+            format, stream->index, INT64_MIN, target_ts, target_ts, 0);
+        if (seek_status < 0) {
+            // Some containers do not support seeking; fall back to the start.
+            (void)avformat_seek_file(format, stream->index, INT64_MIN, 0, 0, 0);
+            std::snprintf(debug, sizeof(debug),
+                "avformat_seek_file failed (%d); fell back to the start", seek_status);
+            debug_log_thumbnail(debug);
+        } else {
+            std::snprintf(debug, sizeof(debug),
+                "avformat_seek_file ok (status %d)", seek_status);
+            debug_log_thumbnail(debug);
+        }
+        // Drop any packets the demuxer buffered before the seek (e.g. during
+        // header parsing); without this, av_read_frame can keep serving the
+        // pre-seek stream from its internal buffer.
+        avformat_flush(format);
+        std::snprintf(debug, sizeof(debug), "avio position after seek: %lld",
+            static_cast<long long>(format->pb != nullptr ? format->pb->pos : -1));
+        debug_log_thumbnail(debug);
+    } else {
+        debug_log_thumbnail("single-frame media (image): using the first frame (no seek)");
     }
 
     const AVCodec* decoder =
@@ -236,39 +302,123 @@ Result<AvFramePtr> decode_representative_frame(
         return media_error("open video decoder", status);
     }
 
-    std::int64_t packets_seen = 0;
+    // Keyframe-only decode walk. A "successful" container seek can still
+    // leave the demuxer serving the stream from its start (observed with the
+    // custom AVIO: avformat_seek_file returns 0 yet the first packet is at
+    // 0.000 s even after avformat_flush). Instead of trusting the seek, decode
+    // forward from the current position, skipping non-keyframes, until the
+    // first frame at/after the target appears; the closest frame before the
+    // target is kept as a fallback. Bounded by a packet budget scaled to the
+    // target, so a no-op seek still finishes quickly.
+    codec->skip_frame = AVDISCARD_NONKEY;
     AvPacketPtr packet(av_packet_alloc());
     if (!packet) {
         return VaultError{VaultErrorCode::CryptoFailure,
             "unable to allocate FFmpeg packet"};
     }
-    while (av_read_frame(format, packet.get()) >= 0 && packets_seen < kMaxDecodePackets) {
+    const double target_seconds = static_cast<double>(target_ms) / 1000.0;
+    // The walk must be able to reach the target even when the container seek
+    // no-ops, so the budget scales with the target (≈8× the worst-case packet
+    // count) and is NOT capped by kMaxDecodePackets, which bounds other
+    // decode uses. When the seek works the walk stops after a few packets.
+    const std::int64_t packet_budget =
+        4000LL + static_cast<std::int64_t>(target_ms) * 8LL;
+    std::int64_t packets_seen = 0;
+    bool first_video_packet_logged = false;
+    bool have_frame = false;
+    bool reached_target = false;
+    double frame_seconds = -1.0;
+    double chosen_seconds = -1.0;
+    AvFramePtr chosen;
+    AvFramePtr frame(av_frame_alloc());
+    if (!frame) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg frame"};
+    }
+    while (!reached_target
+        && av_read_frame(format, packet.get()) >= 0
+        && packets_seen < packet_budget) {
         ++packets_seen;
         if (packet->stream_index != stream->index) {
             av_packet_unref(packet.get());
             continue;
+        }
+        if (!first_video_packet_logged) {
+            first_video_packet_logged = true;
+            if (packet->pts != AV_NOPTS_VALUE && stream->time_base.den > 0) {
+                std::snprintf(debug, sizeof(debug),
+                    "first video packet after seek at %.3f s (packets_seen %lld)",
+                    static_cast<double>(packet->pts)
+                        * stream->time_base.num / stream->time_base.den,
+                    static_cast<long long>(packets_seen));
+            } else {
+                std::snprintf(debug, sizeof(debug),
+                    "first video packet after seek has unknown pts (packets_seen %lld)",
+                    static_cast<long long>(packets_seen));
+            }
+            debug_log_thumbnail(debug);
         }
         status = avcodec_send_packet(codec.get(), packet.get());
         av_packet_unref(packet.get());
         if (status < 0) {
             return media_error("feed packet to video decoder", status);
         }
-        AvFramePtr frame(av_frame_alloc());
-        if (!frame) {
-            return VaultError{VaultErrorCode::CryptoFailure,
-                "unable to allocate FFmpeg frame"};
+        while (true) {
+            status = avcodec_receive_frame(codec.get(), frame.get());
+            if (status == AVERROR(EAGAIN)) {
+                break;
+            }
+            if (status < 0) {
+                // Decode error / end of stream: keep whatever we already have.
+                reached_target = true;
+                break;
+            }
+            if (frame->pts != AV_NOPTS_VALUE && stream->time_base.den > 0) {
+                frame_seconds = static_cast<double>(frame->pts)
+                    * stream->time_base.num / stream->time_base.den;
+            } else {
+                frame_seconds = -1.0;
+            }
+            if (frame_seconds >= 0.0 && frame_seconds <= target_seconds) {
+                // Closest keyframe at/before the target so far.
+                if (!have_frame || frame_seconds >= chosen_seconds) {
+                    chosen = AvFramePtr(av_frame_clone(frame.get()));
+                    if (!chosen) {
+                        return VaultError{VaultErrorCode::CryptoFailure,
+                            "unable to clone FFmpeg frame"};
+                    }
+                    chosen_seconds = frame_seconds;
+                    have_frame = true;
+                }
+            } else if (frame_seconds >= 0.0 && frame_seconds >= target_seconds) {
+                // Reached the target: this frame is the best answer.
+                chosen = AvFramePtr(av_frame_clone(frame.get()));
+                if (!chosen) {
+                    return VaultError{VaultErrorCode::CryptoFailure,
+                        "unable to clone FFmpeg frame"};
+                }
+                chosen_seconds = frame_seconds;
+                have_frame = true;
+                reached_target = true;
+                break;
+            }
         }
-        status = avcodec_receive_frame(codec.get(), frame.get());
-        if (status == AVERROR(EAGAIN)) {
-            continue;
-        }
-        if (status < 0) {
-            return media_error("decode video frame", status);
-        }
-        return frame;
     }
-    return VaultError{VaultErrorCode::UnsupportedVideoFormat,
-        "no decodable video frame was found"};
+    if (!have_frame) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "no decodable video frame was found"};
+    }
+    if (chosen_seconds >= 0.0) {
+        std::snprintf(debug, sizeof(debug),
+            "decoded frame at %.3f s (target %.3f s, packets_seen %lld)",
+            chosen_seconds, target_seconds, static_cast<long long>(packets_seen));
+    } else {
+        std::snprintf(debug, sizeof(debug),
+            "decoded frame at unknown timestamp (target %.3f s, packets_seen %lld)",
+            target_seconds, static_cast<long long>(packets_seen));
+    }
+    debug_log_thumbnail(debug);
+    return chosen;
 }
 
 Result<std::pair<std::uint32_t, std::uint32_t>> scaled_dimensions(

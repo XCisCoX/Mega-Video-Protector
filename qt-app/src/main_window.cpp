@@ -80,6 +80,47 @@ void clearSecret(std::string& secret) noexcept {
     }
 }
 
+// Gallery items are recreated from scratch on every refreshGallery() (search
+// keystrokes, tag filters, deletes...), so raw QTreeWidgetItem* /
+// QListWidgetItem* captured by in-flight async watchers dangle as soon as the
+// tree is cleared. Resolve items by their stored video id at completion time
+// instead of keeping pointers across the async boundary.
+QTreeWidgetItem* findTreeItemById(QTreeWidget* tree, const std::int64_t video_id) {
+    for (int i = 0; i < tree->topLevelItemCount(); ++i) {
+        auto* item = tree->topLevelItem(i);
+        if (item->data(0, Qt::UserRole).toLongLong() == video_id) {
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id) {
+    for (int i = 0; i < list->count(); ++i) {
+        auto* item = list->item(i);
+        if (item->data(Qt::UserRole).toLongLong() == video_id) {
+            return item;
+        }
+    }
+    return nullptr;
+}
+
+// Icon/list cards show the video name plus, in large-icon (IconMode) view, the
+// tags underneath so tag-based searches are visible at a glance. The compact
+// List mode keeps the single-line name. The display text is derived from data
+// roles so it can be rebuilt when the user switches view modes.
+void updateIconItemText(QListWidgetItem* item) {
+    const QString name = item->data(Qt::UserRole + 1).toString();
+    const QString tags = item->data(Qt::UserRole + 2).toString();
+    if (item->listWidget() != nullptr
+        && item->listWidget()->viewMode() == QListView::IconMode
+        && !tags.isEmpty()) {
+        item->setText(QStringLiteral("%1\n%2").arg(name, tags));
+    } else {
+        item->setText(name);
+    }
+}
+
 QLabel* heading(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
     label->setObjectName(QStringLiteral("pageTitle"));
@@ -403,7 +444,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setViewMode(QListView::IconMode);
     iconList_->setIconSize(QSize(128, 128));
-    iconList_->setGridSize(QSize(172, 192));
+    iconList_->setGridSize(QSize(172, 224));
     iconList_->setSpacing(8);
     iconList_->setWordWrap(true);
     iconList_->setResizeMode(QListView::Adjust);
@@ -490,7 +531,7 @@ void MainWindow::setViewMode(const int index) {
     case 1: // Large icons
         iconList_->setViewMode(QListView::IconMode);
         iconList_->setIconSize(QSize(128, 128));
-        iconList_->setGridSize(QSize(172, 192));
+        iconList_->setGridSize(QSize(172, 224));
         galleryStack_->setCurrentWidget(iconList_);
         break;
     default: // List
@@ -498,6 +539,11 @@ void MainWindow::setViewMode(const int index) {
         iconList_->setIconSize(QSize(32, 32));
         galleryStack_->setCurrentWidget(iconList_);
         break;
+    }
+    // Large-icon cards carry a name + tags caption; rebuild the captions so
+    // they match the mode that was just selected.
+    for (int i = 0; i < iconList_->count(); ++i) {
+        updateIconItemText(iconList_->item(i));
     }
     // Relayout from the top so icons never start half-clipped after a mode
     // switch (Qt IconMode keeps the old scroll offset and item layout).
@@ -557,8 +603,8 @@ void MainWindow::refreshTagFilter() {
     }));
 }
 
-void MainWindow::beginEditTags(const std::int64_t video_id) {
-    if (!vault_ || !vault_->is_unlocked() || video_id < 0) {
+void MainWindow::beginEditTags(const std::vector<std::int64_t>& video_ids) {
+    if (!vault_ || !vault_->is_unlocked() || video_ids.empty()) {
         return;
     }
     const auto vault = vault_;
@@ -568,16 +614,42 @@ void MainWindow::beginEditTags(const std::int64_t video_id) {
     tagEditorWatcher_ = new QFutureWatcher<std::shared_ptr<TagEditorData>>(this);
     connect(tagEditorWatcher_, &QFutureWatcherBase::finished, this,
         [this] { finishEditTags(); });
-    tagEditorWatcher_->setFuture(QtConcurrent::run([vault, video_id] {
+    tagEditorWatcher_->setFuture(QtConcurrent::run([vault, video_ids] {
         auto data = std::make_shared<TagEditorData>();
-        data->video_id = video_id;
+        data->video_ids = video_ids;
         auto all = vault->list_tags();
         if (all) {
             data->all_tags = all.value();
         }
-        auto own = vault->tags_for_video(video_id);
-        if (own) {
-            data->video_tags = own.value();
+        // A tag starts checked only when EVERY selected video carries it, so
+        // the dialog applies one exact tag set to all of them: checking adds
+        // the tag to every video, unchecking removes it from every video.
+        // Tags held by only some videos are left alone unless the user
+        // explicitly checks or unchecks them.
+        QSet<QString> shared;
+        std::vector<core::TagInfo> first_video_tags;
+        bool first = true;
+        for (const auto id : video_ids) {
+            auto own = vault->tags_for_video(id);
+            if (!own) {
+                continue;
+            }
+            QSet<QString> names;
+            for (const auto& tag : own.value()) {
+                names.insert(QString::fromStdString(tag.name));
+            }
+            if (first) {
+                shared = names;
+                first_video_tags = own.value();
+                first = false;
+            } else {
+                shared.intersect(names);
+            }
+        }
+        for (const auto& tag : first_video_tags) {
+            if (shared.contains(QString::fromStdString(tag.name))) {
+                data->video_tags.push_back(tag);
+            }
         }
         return data;
     }));
@@ -595,6 +667,14 @@ void MainWindow::finishEditTags() {
     QDialog dialog(this);
     dialog.setWindowTitle(QStringLiteral("Edit tags"));
     auto* layout = new QVBoxLayout(&dialog);
+
+    if (data->video_ids.size() > 1U) {
+        auto* hint = new QLabel(
+            QStringLiteral("Applying to %1 selected videos — checked tags are set on all of them.")
+                .arg(data->video_ids.size()), &dialog);
+        hint->setWordWrap(true);
+        layout->addWidget(hint);
+    }
 
     auto* list = new QListWidget(&dialog);
     QSet<QString> applied;
@@ -658,7 +738,7 @@ void MainWindow::finishEditTags() {
     }
 
     const auto vault = vault_;
-    const auto video_id = data->video_id;
+    const auto video_ids = data->video_ids;
     importButton_->setEnabled(false);
     importFolderButton_->setEnabled(false);
     settingsButton_->setEnabled(false);
@@ -680,10 +760,12 @@ void MainWindow::finishEditTags() {
         refreshTagFilter();
         refreshGallery();
     });
-    adminWatcher_->setFuture(QtConcurrent::run([vault, video_id, applied, desired] {
+    adminWatcher_->setFuture(QtConcurrent::run([vault, video_ids, applied, desired] {
         for (const auto& name : desired) {
             if (!applied.contains(name)) {
-                (void)vault->add_tag(video_id, name.toUtf8().constData());
+                for (const auto id : video_ids) {
+                    (void)vault->add_tag(id, name.toUtf8().constData());
+                }
             }
         }
         auto tags = vault->list_tags();
@@ -691,7 +773,9 @@ void MainWindow::finishEditTags() {
             for (const auto& tag : tags.value()) {
                 const QString name = QString::fromStdString(tag.name);
                 if (applied.contains(name) && !desired.contains(name)) {
-                    (void)vault->remove_tag(video_id, tag.id);
+                    for (const auto id : video_ids) {
+                        (void)vault->remove_tag(id, tag.id);
+                    }
                 }
             }
         }
@@ -727,7 +811,13 @@ void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
     if (chosen == play) {
         beginPlayback(video_id);
     } else if (chosen == editTags) {
-        beginEditTags(video_id);
+        // Apply to the whole selection when multiple items are selected;
+        // fall back to the clicked video when nothing is selected.
+        auto ids = selectedVideoIds();
+        if (ids.empty()) {
+            ids.push_back(video_id);
+        }
+        beginEditTags(ids);
     } else if (chosen == restore) {
         // Restore the clicked video; if the selection holds multiple items,
         // restore all of them.
@@ -865,8 +955,9 @@ void MainWindow::beginImport() {
     }
     setError(galleryStatus_, {});
     const QStringList selected = QFileDialog::getOpenFileNames(
-        this, QStringLiteral("Import videos"), {},
-        QStringLiteral("Video files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.ts *.flv *.3gp *.mpg *.mpeg);;All files (*)"));
+        this, QStringLiteral("Import media"), {},
+        QStringLiteral("Media files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.ts *.flv *.3gp *.mpg *.mpeg"
+                       " *.jpg *.jpeg *.png *.webp *.bmp *.gif);;All files (*)"));
     if (selected.isEmpty()) {
         return;
     }
@@ -892,12 +983,14 @@ void MainWindow::beginImportFolder() {
     QDir directory(selected);
     const QStringList names = directory.entryList(
         {"*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv", "*.webm", "*.m4v",
-         "*.ts", "*.flv", "*.3gp", "*.mpg", "*.mpeg", "*.MP4", "*.MKV",
-         "*.AVI", "*.MOV", "*.WMV", "*.WEBM", "*.M4V", "*.TS", "*.FLV",
-         "*.3GP", "*.MPG", "*.MPEG"},
+         "*.ts", "*.flv", "*.3gp", "*.mpg", "*.mpeg",
+         "*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp", "*.gif",
+         "*.MP4", "*.MKV", "*.AVI", "*.MOV", "*.WMV", "*.WEBM", "*.M4V",
+         "*.TS", "*.FLV", "*.3GP", "*.MPG", "*.MPEG",
+         "*.JPG", "*.JPEG", "*.PNG", "*.WEBP", "*.BMP", "*.GIF"},
         QDir::Files | QDir::Readable, QDir::Name);
     if (names.isEmpty()) {
-        setError(galleryStatus_, QStringLiteral("No video files were found in that folder."));
+        setError(galleryStatus_, QStringLiteral("No media files were found in that folder."));
         galleryStatus_->setVisible(true);
         return;
     }
@@ -937,6 +1030,7 @@ void MainWindow::beginImportMany(std::vector<std::filesystem::path> sources) {
 }
 
 void MainWindow::finishBatch(const bool ok, const QString& message, const int count) {
+    Q_UNUSED(count)
     batchBusy_ = false;
     importButton_->setEnabled(true);
     importFolderButton_->setEnabled(true);
@@ -1126,9 +1220,12 @@ void MainWindow::refreshGallery() {
                 std::to_string(video.imported_at));
 
             // Icon/list view item.
-            auto* iconItem = new QListWidgetItem(name, iconList_);
+            auto* iconItem = new QListWidgetItem(iconList_);
             iconItem->setData(Qt::UserRole, static_cast<qlonglong>(video_id));
+            iconItem->setData(Qt::UserRole + 1, name);
+            iconItem->setData(Qt::UserRole + 2, tags_text);
             iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+            updateIconItemText(iconItem);
 
             // Details view item.
             auto* treeItem = new QTreeWidgetItem(detailsTree_);
@@ -1143,19 +1240,30 @@ void MainWindow::refreshGallery() {
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
             connect(thumbWatcher, &QFutureWatcherBase::finished, this,
-                [this, vault, video_id, iconItem, treeItem, thumbWatcher] {
+                [this, video_id, thumbWatcher] {
                     const auto outcome = *thumbWatcher->result();
                     thumbWatcher->deleteLater();
                     if (!outcome || outcome.value().bytes.empty()) {
                         return;
                     }
+                    auto* iconItem = findListItemById(iconList_, video_id);
+                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    if (iconItem == nullptr && treeItem == nullptr) {
+                        // Item was cleared out by a newer refresh before the
+                        // thumbnail landed; nothing to attach it to.
+                        return;
+                    }
                     QPixmap pixmap;
                     if (pixmap.loadFromData(outcome.value().bytes.data(),
                             static_cast<int>(outcome.value().bytes.size()))) {
-                        iconItem->setIcon(QIcon(pixmap.scaled(
-                            128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
-                        treeItem->setIcon(0, QIcon(pixmap.scaled(
-                            32, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                        if (iconItem != nullptr) {
+                            iconItem->setIcon(QIcon(pixmap.scaled(
+                                128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                        }
+                        if (treeItem != nullptr) {
+                            treeItem->setIcon(0, QIcon(pixmap.scaled(
+                                32, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                        }
                     }
                 });
             thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
@@ -1167,10 +1275,16 @@ void MainWindow::refreshGallery() {
             auto* mediaWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::MediaInfo>>>(this);
             connect(mediaWatcher, &QFutureWatcherBase::finished, this,
-                [this, vault, video_id, treeItem, mediaWatcher] {
+                [this, video_id, mediaWatcher] {
                     const auto outcome = *mediaWatcher->result();
                     mediaWatcher->deleteLater();
                     if (!outcome) {
+                        return;
+                    }
+                    auto* treeItem = findTreeItemById(detailsTree_, video_id);
+                    if (treeItem == nullptr) {
+                        // Row was cleared out by a newer refresh (e.g. a search
+                        // keystroke) before the metadata landed.
                         return;
                     }
                     const core::MediaInfo& info = outcome.value();

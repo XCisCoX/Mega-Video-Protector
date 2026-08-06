@@ -43,6 +43,8 @@ public:
     std::int64_t duration_ms() const;
     int video_width() const;
     int video_height() const;
+    // FFmpeg codec name of the video stream (e.g. "h264", "png", "mjpeg").
+    std::string video_codec_name() const;
 
     // True when an audio stream is available and configured.
     bool has_audio() const;

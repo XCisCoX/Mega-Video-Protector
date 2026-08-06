@@ -357,6 +357,12 @@ public:
             return false;
         }
         handle_->io.reset(raw_io);
+        // avio_alloc_context zeroes `seekable`; without this flag FFmpeg
+        // refuses every avio_seek (AVERROR(ENOSYS)), which made both the
+        // player's seek_to() and the thumbnail seek silently fail (falling
+        // back to the first frame). VaultSource::seek is functional — the
+        // stream must advertise that.
+        raw_io->seekable = AVIO_SEEKABLE_NORMAL;
 
         AVFormatContext* raw_format = avformat_alloc_context();
         if (raw_format == nullptr) {
@@ -505,6 +511,9 @@ public:
         if (last_seek_status_ < 0) {
             return false;
         }
+        // Drop packets the demuxer buffered before the seek; without this,
+        // av_read_frame keeps serving the pre-seek stream.
+        avformat_flush(handle_->format.get());
         if (video_codec_) {
             avcodec_flush_buffers(video_codec_.get());
         }
@@ -578,6 +587,11 @@ public:
     std::int64_t duration_ms() const { return duration_ms_; }
     int video_width() const { return video_width_; }
     int video_height() const { return video_height_; }
+    std::string video_codec_name() const {
+        return video_codec_
+            ? std::string(avcodec_get_name(video_codec_->codec_id))
+            : std::string();
+    }
     bool has_audio() const { return audio_stream_ != -1 && audio_codec_ && swr_; }
     int audio_sample_rate() const { return audio_sample_rate_; }
     int audio_channels() const { return audio_channels_; }
@@ -710,6 +724,9 @@ bool MediaDecoder::is_open() const { return impl_->is_open(); }
 std::int64_t MediaDecoder::duration_ms() const { return impl_->duration_ms(); }
 int MediaDecoder::video_width() const { return impl_->video_width(); }
 int MediaDecoder::video_height() const { return impl_->video_height(); }
+std::string MediaDecoder::video_codec_name() const {
+    return impl_->video_codec_name();
+}
 bool MediaDecoder::has_audio() const { return impl_->has_audio(); }
 int MediaDecoder::audio_sample_rate() const { return impl_->audio_sample_rate(); }
 int MediaDecoder::audio_channels() const { return impl_->audio_channels(); }
