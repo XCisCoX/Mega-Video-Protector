@@ -1,0 +1,247 @@
+name: Beta
+
+# Two ways to create a release:
+#   1. Manual:  Actions -> "Release" -> "Run workflow" -> optional version
+#      (e.g. 0.4.0; empty = auto vYYYY.MM.DD.HHMM). Creates the tag itself.
+#   2. Tag push: git tag v0.4.0 && git push origin v0.4.0  (builds automatically).
+on:
+  workflow_dispatch:
+    inputs:
+      version:
+        description: 'Version to Beta (e.g. 0.4.0). Empty = auto (vYYYY.MM.DD.HHMM).'
+        required: false
+        default: ''
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+
+# Node-runtime note: all actions here run on Node 24 (checkout@v5; the
+# floating @v4/@v2 tags track their maintainers' Node 24 releases). No
+# Node 20-only actions are used, so the fall-2026 Node 20 removal on runners
+# cannot break this workflow.
+jobs:
+  build-windows:
+    # Pinned instead of the floating windows-latest: when that label moves to
+    # a newer image, CMake's "Visual Studio 17 2022" generator can fail VS
+    # discovery at project() with "could not find any instance of Visual
+    # Studio". windows-2022 ships the VS 2022 toolset (17.x) this project's
+    # Qt 5.12.12 msvc2017_64 kit and MSVC 14.44 toolchain target.
+    runs-on: windows-2022
+    timeout-minutes: 90
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install Qt 5.12.12 (msvc2017_64)
+        uses: jurplel/install-qt-action@v4
+        with:
+          version: '5.12.12'
+          arch: 'win64_msvc2017_64'
+          cache: true
+
+      # Diagnostic: confirms which Visual Studio (if any) the runner exposes.
+      # CMake's VS generator resolves installations through the same vswhere
+      # query, so this makes a future detection failure self-explanatory.
+      - name: Detect Visual Studio (diagnostic)
+        shell: pwsh
+        run: |
+          & "${env:ProgramFiles(x86)}\Microsoft Visual Studio\Installer\vswhere.exe" `
+            -latest -products '*' -requires Microsoft.VisualStudio.Component.VC.Tools.x86.x64 `
+            -property installationPath
+
+      # The repo pins a vcpkg baseline (b1b19307...) that preinstalled runner
+      # vcpkg copies may not resolve. A FULL clone is required: a shallow
+      # clone does not contain the baseline commit, so `git show
+      # <baseline>:versions/baseline.json` fails ("failed to git show").
+      - name: Bootstrap vcpkg
+        shell: pwsh
+        run: |
+          git clone https://github.com/microsoft/vcpkg.git "$env:RUNNER_TEMP\vcpkg"
+          & "$env:RUNNER_TEMP\vcpkg\bootstrap-vcpkg.bat" -disableMetrics
+
+      - name: Install dependencies (argon2, libsodium, sqlcipher, ffmpeg)
+        shell: pwsh
+        env:
+          # Speed: two independent wins.
+          # 1) The x64-windows-release overlay triplet (third_party/
+          #    vcpkg-overlays/triplets) builds only the Release configuration
+          #    — without it vcpkg builds every port twice and ffmpeg alone
+          #    spent ~19 min per configuration.
+          # 2) VCPKG_BINARY_SOURCES=x-gha caches built ports in the GitHub
+          #    Actions cache service (the runner provides ACTIONS_CACHE_URL /
+          #    ACTIONS_RUNTIME_TOKEN automatically), so later runs restore
+          #    ffmpeg/openssl/etc. from cache instead of recompiling.
+          VCPKG_BINARY_SOURCES: clear;x-gha,readwrite
+        run: |
+          # --vcpkg-root overrides the runner's VS-installed VCPKG_ROOT env
+          # (otherwise vcpkg detects the temp root and warns about the mismatch).
+          & "$env:RUNNER_TEMP\vcpkg\vcpkg.exe" install `
+            --vcpkg-root="$env:RUNNER_TEMP\vcpkg" `
+            --triplet x64-windows-release `
+            --overlay-triplets="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
+            --x-install-root="$env:RUNNER_TEMP\vcpkg_installed"
+
+      # vcpkg's ffmpeg port installs stub import libs; rebuild them from the
+      # DLL export tables (same step as local builds; paths come from env).
+      # MSVC is located by the script itself via vswhere (no dev-cmd step).
+      - name: Regenerate FFmpeg import libraries
+        shell: bash
+        env:
+          MVP_VCPKG_INSTALLED: ${{ runner.temp }}\vcpkg_installed\x64-windows-release
+          MVP_FFMPEG_DEFS: ${{ runner.temp }}\ffmpeg-defs
+        run: bash scripts/regenerate-ffmpeg-importlibs.sh
+
+      - name: Configure (Release)
+        shell: pwsh
+        run: |
+          cmake --preset vs2022-x64 `
+            -DCMAKE_TOOLCHAIN_FILE="$env:RUNNER_TEMP\vcpkg\scripts\buildsystems\vcpkg.cmake" `
+            -DCMAKE_PREFIX_PATH="$env:QT_ROOT_DIR" `
+            -DVCPKG_INSTALLED_DIR="$env:RUNNER_TEMP\vcpkg_installed" `
+            -DVCPKG_TARGET_TRIPLET=x64-windows-release `
+            -DVCPKG_OVERLAY_TRIPLETS="$env:GITHUB_WORKSPACE\third_party\vcpkg-overlays\triplets" `
+            -DVCPKG_INSTALL_OPTIONS="" `
+            -DCMAKE_SYSTEM_VERSION=""
+
+      - name: Build (Release)
+        shell: pwsh
+        run: |
+          cmake --build out/build/vs2022-x64 --config Release -- /m
+
+      - name: Run tests (Release)
+        shell: pwsh
+        run: |
+          # Prepend the runtime DLL dirs INSIDE the step. An env-block PATH
+          # override would use $(PATH), which GitHub Actions does not expand
+          # (only double-brace template expressions are) — PowerShell then
+          # evaluates $(PATH) to an empty string and the system PATH (and
+          # ctest with it) is lost.
+          $env:PATH = "$env:RUNNER_TEMP\vcpkg_installed\x64-windows-release\bin;$env:QT_ROOT_DIR\bin;$env:PATH"
+          ctest --test-dir out/build/vs2022-x64 -C Release --output-on-failure
+
+      - name: Package application
+        shell: pwsh
+        run: |
+          $exeDir = "out/build/vs2022-x64/qt-app/Release"
+          $exe = "$exeDir\MegaVideoProtect.exe"
+          if (-not (Test-Path $exe)) { throw "Release exe not found: $exe" }
+          $staging = "$env:RUNNER_TEMP\package"
+          New-Item -ItemType Directory -Force -Path $staging | Out-Null
+          Copy-Item $exe $staging
+          # Ship EVERY runtime DLL the linker resolved (staged next to the exe
+          # by the POST_BUILD TARGET_RUNTIME_DLLS copy): Qt, argon2, libsodium,
+          # sqlcipher, libcrypto (OpenSSL), and FFmpeg. The previous hand-
+          # picked list forgot argon2/libsodium/sqlcipher, which made the zip
+          # fail on clean machines.
+          Get-ChildItem "$exeDir\*.dll" | Copy-Item -Destination $staging
+          # Gather Qt platform plugins, styles, ICU, etc.
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
+          # Defensive: the crypto stack and the five FFmpeg DLLs must be in the
+          # package (throw with a clear message if any are missing).
+          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
+            if (-not (Test-Path "$staging\$dll")) { throw "Missing runtime DLL in package: $dll" }
+          }
+          Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVideoProtect-windows-x64.zip" -Force
+          Write-Output "Packaged:"
+          Get-ChildItem $staging | Select-Object -ExpandProperty Name
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MegaVideoProtect-windows-x64
+          path: ${{ runner.temp }}/MegaVideoProtect-windows-x64.zip
+
+  build-linux:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 60
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Install dependencies (Qt 5, FFmpeg, SQLCipher, Argon2, libsodium)
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            qtbase5-dev qtmultimedia5-dev libqt5multimedia5-plugins \
+            libavcodec-dev libavformat-dev libavutil-dev libswscale-dev libswresample-dev \
+            libsqlcipher-dev libargon2-dev libsodium-dev \
+            gstreamer1.0-plugins-base gstreamer1.0-plugins-good
+
+      - name: Configure (Release)
+        run: cmake --preset linux-release
+
+      - name: Build (Release)
+        run: cmake --build --preset linux-release -j "$(nproc)"
+
+      - name: Run tests (Release, headless)
+        env:
+          QT_QPA_PLATFORM: offscreen
+        run: ctest --test-dir out/build/linux-release -C Release --output-on-failure
+
+      - name: Package application
+        run: |
+          bin="out/build/linux-release/qt-app/MegaVideoProtect"
+          if [ ! -x "$bin" ]; then echo "Release binary not found: $bin"; exit 1; fi
+          staging="$RUNNER_TEMP/package"
+          mkdir -p "$staging"
+          cp "$bin" "$staging/"
+          # The binary links distro Qt/FFmpeg/sqlcipher/argon2/libsodium;
+          # runtime requirements are documented in the README (qtmultimedia5
+          # plugins + gstreamer for audio). An AppImage bundle can be added
+          # in a later phase.
+          tar -C "$staging" -czf "$RUNNER_TEMP/MegaVideoProtect-linux-x64.tar.gz" .
+
+      - name: Upload artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: MegaVideoProtect-linux-x64
+          path: ${{ runner.temp }}/MegaVideoProtect-linux-x64.tar.gz
+
+  release:
+    needs: [build-windows, build-linux]
+    runs-on: ubuntu-latest
+    timeout-minutes: 15
+    steps:
+      - uses: actions/checkout@v5
+
+      - name: Resolve release version
+        id: version
+        shell: bash
+        run: |
+          if [ "${{ github.event_name }}" = "push" ]; then
+            echo "tag=${GITHUB_REF_NAME}" >> "$GITHUB_OUTPUT"
+          elif [ -n "${{ github.event.inputs.version }}" ]; then
+            echo "tag=v${{ github.event.inputs.version }}" >> "$GITHUB_OUTPUT"
+          else
+            echo "tag=v$(date +%Y.%m.%d.%H%M)" >> "$GITHUB_OUTPUT"
+          fi
+
+      - name: Download artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: ${{ runner.temp }}/artifacts
+          merge-multiple: true
+
+      - name: Create GitHub Beta
+        uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ steps.version.outputs.tag }}
+          name: Mega Video Protect ${{ steps.version.outputs.tag }}
+          body: |
+            Automated Windows x64 + Linux x64 builds (Release).
+
+            What's inside:
+            - Full vault core: Argon2id, SQLCipher-encrypted database, domain-separated subkeys, authenticated .vvp package format
+            - Explorer-style gallery: Details / Large icons / List, dark theme, thumbnails at import
+            - Tags: multi-tag per video, tag search + filter, tag editor
+            - In-memory player: streaming authenticated reader, read-ahead cache (4-128 MB), volume/mute, fullscreen, keyboard shortcuts
+            - All 7 test suites pass on both platforms (Smoke, Gallery, Admin, Reader, Media, Playback, Tags)
+
+            Windows: extract the zip anywhere and launch MegaVideoProtect.exe.
+            Linux: extract the tarball and run ./MegaVideoProtect (requires the
+            distro packages listed in the README: Qt 5 Multimedia + GStreamer
+            plugins for audio, FFmpeg, SQLCipher, Argon2, libsodium).
+          files: |
+            ${{ runner.temp }}/artifacts/MegaVideoProtect-windows-x64.zip
+            ${{ runner.temp }}/artifacts/MegaVideoProtect-linux-x64.tar.gz
