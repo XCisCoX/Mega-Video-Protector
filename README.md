@@ -50,8 +50,8 @@ Mega Video Protect is a desktop video organizer that treats privacy as the defau
 | ![Setup](docs/screenshots/01-setup.png) | ![Login](docs/screenshots/02-login.png) |
 | **Details view** — name, size, duration, resolution, codec, tags. | **Large icons** — thumbnail grid with live tag filter and search. |
 | ![Details](docs/screenshots/03-gallery-details.png) | ![Icons](docs/screenshots/04-gallery-icons.png) |
-| **In-memory player** — seek bar, volume, fullscreen, keyboard shortcuts. | **Settings** — cache budget and playback preferences. |
-| ![Player](docs/screenshots/05-player.png) | ![Settings](docs/screenshots/06-settings.png) |
+| **Settings** — cache budget and playback preferences. | **In-memory player** — seek bar, volume, fullscreen, keyboard shortcuts. |
+|![Settings](docs/screenshots/05-settings.png) | ![Player](docs/screenshots/06-player.png) | 
 
 ## Security model
 
