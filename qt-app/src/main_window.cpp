@@ -25,6 +25,7 @@
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
+#include <QDateTime>
 #include <QListView>
 #include <QListWidget>
 #include <QMenu>
@@ -230,6 +231,12 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
+    // The player is an unparented top-level window (so it can be covered by
+    // the main window), so close it explicitly to stop its worker thread
+    // before the vault goes away.
+    if (playerWindow_ != nullptr) {
+        playerWindow_->close();
+    }
     // Stop the batch worker before the vault goes away: quit the event loop,
     // then wait for the current batch item to finish (bounded).
     if (batchThread_ != nullptr) {
@@ -1225,6 +1232,11 @@ void MainWindow::refreshGallery() {
             iconItem->setData(Qt::UserRole + 1, name);
             iconItem->setData(Qt::UserRole + 2, tags_text);
             iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+            iconItem->setToolTip(QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
+            arg(name).
+            arg(size_text).
+            arg(tags_text).
+            arg(QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss")));
             updateIconItemText(iconItem);
 
             // Details view item.
@@ -1233,9 +1245,13 @@ void MainWindow::refreshGallery() {
             treeItem->setText(1, size_text);
             treeItem->setText(2, QStringLiteral("…"));
             treeItem->setText(5, tags_text);
-            treeItem->setText(6, imported_text);
+            treeItem->setText(6, QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"));
             treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video_id));
-
+            treeItem->setToolTip(0, QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
+            arg(name).
+            arg(size_text).
+            arg(tags_text).
+            arg(QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss")));
             // Attach a stored thumbnail asynchronously (both views).
             auto* thumbWatcher =
                 new QFutureWatcher<std::shared_ptr<core::Result<core::ThumbnailInfo>>>(this);
@@ -1340,12 +1356,13 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
         return;
     }
     if (playerWindow_ != nullptr) {
+        playerWindow_->playVideo(vault_,video_id);
         playerWindow_->raise();
         playerWindow_->activateWindow();
         return;
     }
     auto* window = new PlayerWindow(
-        vault_, video_id, QStringLiteral("Video"), this);
+        vault_, video_id, QStringLiteral("Video"), nullptr);
     window->setAttribute(Qt::WA_DeleteOnClose);
     connect(window, &QDialog::destroyed, this,
         [this, window] {

@@ -258,6 +258,7 @@ public:
         const QString& title,
         QWidget* parent = nullptr);
     ~PlayerWindow() override;
+    void playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
 
 protected:
     void resizeEvent(QResizeEvent* event) override;

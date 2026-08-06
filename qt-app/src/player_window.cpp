@@ -170,10 +170,19 @@ PlayerWindow::PlayerWindow(
     const QString& title,
     QWidget* parent)
     : QDialog(parent), vault_(vault), video_id_(video_id), title_(title) {
-    setWindowTitle(QStringLiteral("Play — %1").arg(title));
+    setWindowTitle("[SECURE VIDEO PLAYER]");
     resize(960, 620);
     setMinimumSize(480, 320);
     setMouseTracking(true);
+    setWindowFlags(
+    Qt::Window |
+    Qt::CustomizeWindowHint |
+    Qt::WindowTitleHint |
+    Qt::WindowSystemMenuHint |
+    Qt::WindowMinimizeButtonHint |
+    Qt::WindowMaximizeButtonHint |
+    Qt::WindowCloseButtonHint
+    );
 
     QSettings settings;
     volumePercent_ = settings.value(QStringLiteral("player/volume"), 100).toInt();
@@ -446,6 +455,78 @@ PlayerWindow::~PlayerWindow() {
     if (audioOutput_ != nullptr) {
         audioOutput_->stop();
     }
+}
+
+void PlayerWindow::playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id)
+{
+    // Tear down the current playback exactly like the destructor: the worker
+    // loop only exits when quit_ is set, so joining without it blocks the UI
+    // thread forever (the old worker keeps streaming). quit_ must be reset
+    // afterwards or the new worker would exit on its first loop check.
+    quit_.store(true);
+    timer_.stop();
+    if (worker_.joinable()) {
+        worker_.join();
+    }
+    quit_.store(false);
+
+    decoder_.close();
+    if (audioOutput_ != nullptr) {
+        audioOutput_->stop();
+        audioOutput_->deleteLater();
+        audioOutput_ = nullptr;
+    }
+    if (audioSink_ != nullptr) {
+        audioSinkAtomic_.store(nullptr);
+        audioSink_->deleteLater();
+        audioSink_ = nullptr;
+    }
+    audioSetupDone_ = false;
+
+    // Reset per-playback state so the new video starts clean.
+    ended_.store(false);
+    playing_.store(false);
+    openFailed_.store(false);
+    seekErrorPending_.store(false);
+    seeking_.store(false);
+    clickPending_ = false;
+    panning_ = false;
+    autoSized_ = false;
+    durationMs_.store(0);
+    videoWidth_.store(0);
+    videoHeight_.store(0);
+    imageModeFlag_.store(false);
+    if (imageMode_) {
+        // Back to the video chrome (playback controls instead of zoom row).
+        imageMode_ = false;
+        positionSlider_->show();
+        positionLabel_->show();
+        playButton_->show();
+        muteButton_->show();
+        cacheCombo_->show();
+        zoomOutButton_->hide();
+        zoomLabel_->hide();
+        zoomInButton_->hide();
+        fitButton_->hide();
+        imageZoom_ = 0.0;
+        imageOffset_ = QPointF();
+        surface_->setView(0.0, QPointF());
+    }
+    positionSlider_->setRange(0, 1);
+    positionSlider_->setValue(0);
+    positionLabel_->setText(QStringLiteral("0:00 / 0:00"));
+    surface_->clearOverlay();
+    showChrome();
+    updateCenterButton();
+
+    // Start the new playback. The timer->tick connection is made once in the
+    // constructor — connecting again here would run tick() twice per tick.
+    vault_ = std::move(vault);
+    video_id_ = video_id;
+    timer_.setInterval(16);
+    timer_.start();
+    playing_.store(true);
+    worker_ = std::thread(&PlayerWindow::workerLoop, this);
 }
 
 void PlayerWindow::resizeEvent(QResizeEvent* event) {
