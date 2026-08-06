@@ -1,5 +1,5 @@
-name: Beta
-
+name: Beta Build
+prerelease: true
 # Two ways to create a release:
 #   1. Manual:  Actions -> "Release" -> "Run workflow" -> optional version
 #      (e.g. 0.4.0; empty = auto vYYYY.MM.DD.HHMM). Creates the tag itself.
