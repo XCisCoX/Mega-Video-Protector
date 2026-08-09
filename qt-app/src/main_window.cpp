@@ -446,7 +446,11 @@ QWidget* MainWindow::buildUnlockedPage() {
     detailsTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
     detailsTree_->setAcceptDrops(false);
     detailsTree_->header()->setStretchLastSection(true);
-
+    detailsTree_->setSortingEnabled(true);
+    connect(detailsTree_->header(),
+        SIGNAL(sectionClicked(int)),
+        this,
+        SLOT(sortTree(int)));
     iconList_ = new QListWidget(page);
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setViewMode(QListView::IconMode);
@@ -1240,13 +1244,14 @@ void MainWindow::refreshGallery() {
             updateIconItemText(iconItem);
 
             // Details view item.
-            auto* treeItem = new QTreeWidgetItem(detailsTree_);
+            QTreeWidgetItem* treeItem = new QTreeWidgetItem(detailsTree_);
             treeItem->setText(0, name);
             treeItem->setText(1, size_text);
             treeItem->setText(2, QStringLiteral("…"));
             treeItem->setText(5, tags_text);
             treeItem->setText(6, QDateTime::fromSecsSinceEpoch(imported_text.toInt()).toLocalTime().toString("yyyy-MM-dd HH:mm:ss"));
             treeItem->setData(0, Qt::UserRole, static_cast<qlonglong>(video_id));
+
             treeItem->setToolTip(0, QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
             arg(name).
             arg(size_text).
