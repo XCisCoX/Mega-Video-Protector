@@ -1,0 +1,10 @@
+<?xml version="1.0" encoding="utf-8"?>
+<resources>
+    <string name="app_name">Mega Video Protect</string>
+    <style name="AppTheme" parent="android:Theme.Material.NoActionBar">
+        <item name="android:windowBackground">#0c0f15</item>
+        <item name="android:statusBarColor">#0c0f15</item>
+        <item name="android:navigationBarColor">#0c0f15</item>
+        <item name="android:colorAccent">#536fe8</item>
+    </style>
+</resources>

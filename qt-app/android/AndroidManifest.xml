@@ -27,6 +27,17 @@
             </intent-filter>
             <meta-data android:name="android.app.lib_name" android:value="MegaVideoProtect"/>
             <meta-data android:name="android.app.arguments" android:value=""/>
+            <!-- Bundled deployment: the QtLoader reads these meta-data keys to
+                 decide between bundled libs and the (long-dead) Ministro
+                 service. Without use_local_qt_libs=1 the app aborts with
+                 "can't find ministro service". -->
+            <meta-data android:name="android.app.qt_sources_resource_id" android:resource="@array/qt_sources"/>
+            <meta-data android:name="android.app.repository" android:value="default"/>
+            <meta-data android:name="android.app.qt_libs_resource_id" android:resource="@array/qt_libs"/>
+            <meta-data android:name="android.app.bundled_libs_resource_id" android:resource="@array/bundled_libs"/>
+            <meta-data android:name="android.app.load_local_libs_resource_id" android:resource="@array/load_local_libs"/>
+            <meta-data android:name="android.app.use_local_qt_libs" android:value="1"/>
+            <meta-data android:name="android.app.bundle_local_qt_libs" android:value="1"/>
         </activity>
     </application>
 </manifest>

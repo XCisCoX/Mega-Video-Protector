@@ -1,0 +1,50 @@
+[
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/jni_bridge.cpp.o -c /repo/android/app/src/main/cpp/jni_bridge.cpp",
+  "file": "/repo/android/app/src/main/cpp/jni_bridge.cpp",
+  "output": "CMakeFiles/mvpcore.dir/jni_bridge.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/crypto.cpp.o -c /repo/core/src/crypto.cpp",
+  "file": "/repo/core/src/crypto.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/crypto.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/database.cpp.o -c /repo/core/src/database.cpp",
+  "file": "/repo/core/src/database.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/database.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/media.cpp.o -c /repo/core/src/media.cpp",
+  "file": "/repo/core/src/media.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/media.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/metadata.cpp.o -c /repo/core/src/metadata.cpp",
+  "file": "/repo/core/src/metadata.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/metadata.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/package.cpp.o -c /repo/core/src/package.cpp",
+  "file": "/repo/core/src/package.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/package.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/vault.cpp.o -c /repo/core/src/vault.cpp",
+  "file": "/repo/core/src/vault.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/vault.cpp.o"
+},
+{
+  "directory": "/repo/android/app/.cxx/Debug/5t6n5a5b/arm64-v8a",
+  "command": "/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/bin/clang++ --target=aarch64-none-linux-android26 --sysroot=/opt/android-sdk-linux/ndk/30.0.14904198/toolchains/llvm/prebuilt/linux-x86_64/sysroot -DSQLITE_HAS_CODEC -Dmvpcore_EXPORTS -I/repo/android/app/src/main/cpp/../../../../../core/include -I/repo/android/app/src/main/cpp/../../../../../core/src -I/repo/out/android-arm64/prefix/include -g -DANDROID -fdata-sections -ffunction-sections -funwind-tables -fstack-protector-strong -no-canonical-prefixes -D_FORTIFY_SOURCE=2 -Wformat -Werror=format-security  -std=c++20 -fno-limit-debug-info  -fPIC -o CMakeFiles/mvpcore.dir/repo/core/src/version.cpp.o -c /repo/core/src/version.cpp",
+  "file": "/repo/core/src/version.cpp",
+  "output": "CMakeFiles/mvpcore.dir/repo/core/src/version.cpp.o"
+}
+]

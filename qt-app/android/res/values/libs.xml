@@ -1,0 +1,26 @@
+<?xml version='1.0' encoding='utf-8'?>
+<!-- QtLoader resource arrays for the bundled deployment (Qt 5.15.2 arm64-v8a).
+     Items are "ABI;name" pairs; the loader picks the preferred ABI and builds
+     the load path as lib/<abi>/lib<name>.so. The app lib and every plugin are
+     listed in load_local_libs (colon-joined in a single item, like qmake). -->
+<resources>
+    <array name="qt_sources">
+        <item>https://download.qt.io/ministro/android/qt5/qt-5.14</item>
+    </array>
+
+    <array name="bundled_libs" />
+
+    <array name="qt_libs">
+        <item>arm64-v8a;Qt5Core_arm64-v8a</item>
+        <item>arm64-v8a;Qt5Gui_arm64-v8a</item>
+        <item>arm64-v8a;Qt5Widgets_arm64-v8a</item>
+        <item>arm64-v8a;Qt5Multimedia_arm64-v8a</item>
+        <item>arm64-v8a;Qt5MultimediaWidgets_arm64-v8a</item>
+        <item>arm64-v8a;Qt5Concurrent_arm64-v8a</item>
+        <item>arm64-v8a;Qt5Network_arm64-v8a</item>
+    </array>
+
+    <array name="load_local_libs">
+        <item>arm64-v8a;libMegaVideoProtect_arm64-v8a.so:libplugins_platforms_qtforandroid_arm64-v8a.so:libplugins_audio_qtaudio_opensles_arm64-v8a.so:libplugins_mediaservice_qtmedia_android_arm64-v8a.so:libplugins_playlistformats_qtmultimedia_m3u_arm64-v8a.so:libplugins_styles_qandroidstyle_arm64-v8a.so:libplugins_video_videonode_qtsgvideonode_android_arm64-v8a.so:libplugins_imageformats_qico_arm64-v8a.so:libplugins_imageformats_qjpeg_arm64-v8a.so:libplugins_imageformats_qgif_arm64-v8a.so</item>
+    </array>
+</resources>
