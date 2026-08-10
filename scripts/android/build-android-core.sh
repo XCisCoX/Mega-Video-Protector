@@ -197,6 +197,10 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
     make -j"$JOBS" libsqlcipher.la >/dev/null
     cp .libs/libsqlcipher.a "$PREFIX/lib/"
     cp sqlite3.h "$PREFIX/include/"
+    # The core includes <sqlcipher/sqlite3.h> — install the public headers
+    # into the subdirectory layout sqlite3's own `make install` would create.
+    mkdir -p "$PREFIX/include/sqlcipher"
+    cp sqlite3.h sqlite3ext.h "$PREFIX/include/sqlcipher/"
     popd >/dev/null
 fi
 
