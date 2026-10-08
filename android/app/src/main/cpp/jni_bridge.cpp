@@ -72,15 +72,105 @@ std::string err_msg(const std::string& msg) {
 
 std::string jstring_to_string(JNIEnv* env, jstring jstr) {
     if (jstr == nullptr) return {};
-    const char* chars = env->GetStringUTFChars(jstr, nullptr);
+    // Decode UTF-16 rather than using GetStringUTFChars: that returns modified
+    // UTF-8 (CESU-8 for astral characters), which does not round-trip to the
+    // UTF-8 paths the core expects for file names.
+    const jsize length = env->GetStringLength(jstr);
+    const jchar* chars = env->GetStringChars(jstr, nullptr);
     if (chars == nullptr) return {};
-    std::string out(chars);
-    env->ReleaseStringUTFChars(jstr, chars);
+    std::string out;
+    out.reserve(static_cast<std::size_t>(length) * 3U);
+    for (jsize i = 0; i < length; ++i) {
+        std::uint32_t code = chars[i];
+        if (code >= 0xD800U && code <= 0xDBFFU && i + 1 < length
+            && chars[i + 1] >= 0xDC00U && chars[i + 1] <= 0xDFFFU) {
+            code = 0x10000U + ((code - 0xD800U) << 10U)
+                + (static_cast<std::uint32_t>(chars[i + 1]) - 0xDC00U);
+            ++i;
+        }
+        if (code < 0x80U) {
+            out.push_back(static_cast<char>(code));
+        } else if (code < 0x800U) {
+            out.push_back(static_cast<char>(0xC0U | (code >> 6U)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3FU)));
+        } else if (code < 0x10000U) {
+            out.push_back(static_cast<char>(0xE0U | (code >> 12U)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3FU)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3FU)));
+        } else {
+            out.push_back(static_cast<char>(0xF0U | (code >> 18U)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 12U) & 0x3FU)));
+            out.push_back(static_cast<char>(0x80U | ((code >> 6U) & 0x3FU)));
+            out.push_back(static_cast<char>(0x80U | (code & 0x3FU)));
+        }
+    }
+    env->ReleaseStringChars(jstr, chars);
     return out;
 }
 
 jstring to_jstring(JNIEnv* env, const std::string& s) {
-    return env->NewStringUTF(s.c_str());
+    // ART rejects NewStringUTF input that is not valid *modified* UTF-8 (it
+    // aborts the process under CheckJNI): a 4-byte UTF-8 sequence such as an
+    // emoji in a file name is enough. Decode real UTF-8 and hand over UTF-16.
+    bool ascii = true;
+    for (unsigned char c : s) {
+        if (c >= 0x80U) {
+            ascii = false;
+            break;
+        }
+    }
+    if (ascii) return env->NewStringUTF(s.c_str());
+
+    std::u16string utf16;
+    utf16.reserve(s.size());
+    std::size_t i = 0U;
+    while (i < s.size()) {
+        const unsigned char b0 = static_cast<unsigned char>(s[i]);
+        std::uint32_t code = 0U;
+        std::size_t width = 1U;
+        if (b0 < 0x80U) {
+            code = b0;
+        } else if ((b0 & 0xE0U) == 0xC0U) {
+            code = b0 & 0x1FU;
+            width = 2U;
+        } else if ((b0 & 0xF0U) == 0xE0U) {
+            code = b0 & 0x0FU;
+            width = 3U;
+        } else if ((b0 & 0xF8U) == 0xF0U) {
+            code = b0 & 0x07U;
+            width = 4U;
+        } else {
+            utf16.push_back(static_cast<char16_t>(0xFFFDU));
+            ++i;
+            continue;
+        }
+        bool valid = i + width <= s.size();
+        if (valid) {
+            for (std::size_t k = 1U; k < width; ++k) {
+                const unsigned char b = static_cast<unsigned char>(s[i + k]);
+                if ((b & 0xC0U) != 0x80U) {
+                    valid = false;
+                    break;
+                }
+                code = (code << 6U) | (b & 0x3FU);
+            }
+        }
+        if (!valid) {
+            utf16.push_back(static_cast<char16_t>(0xFFFDU));
+            ++i;
+            continue;
+        }
+        i += width;
+        if (code <= 0xFFFFU) {
+            utf16.push_back(static_cast<char16_t>(code));
+        } else {
+            code -= 0x10000U;
+            utf16.push_back(static_cast<char16_t>(0xD800U + (code >> 10U)));
+            utf16.push_back(static_cast<char16_t>(0xDC00U + (code & 0x3FFU)));
+        }
+    }
+    return env->NewString(reinterpret_cast<const jchar*>(utf16.data()),
+        static_cast<jsize>(utf16.size()));
 }
 
 // --- Range reader over Vault::read_video_range (public API) ----------------
@@ -494,6 +584,51 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeDeco
     if (out != nullptr) {
         env->SetByteArrayRegion(out, 0, static_cast<jsize>(rgba->size()),
             reinterpret_cast<const jbyte*>(rgba->data()));
+    }
+    return out;
+}
+
+JNI_METHOD(nativeCreateTag)(JNIEnv* env, jobject, jstring name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string n = jstring_to_string(env, name);
+    // create_tag (not add_tag(-1, ...)): a tag with no video attached.
+    auto result = g_vault->create_tag(n);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"id\":%lld", static_cast<long long>(result.value()));
+    return to_jstring(env, ok_json(buf));
+}
+
+JNIEXPORT jlong JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVideoSize(
+    JNIEnv*, jobject, jlong id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return -1;
+    auto list = g_vault->list_videos();
+    if (!list) return -1;
+    for (const auto& video : list.value()) {
+        if (video.id == static_cast<std::int64_t>(id)) {
+            return static_cast<jlong>(video.original_size);
+        }
+    }
+    return -1;
+}
+
+// Streaming read for the player (Media3 DataSource): returns up to `size`
+// plaintext bytes at `offset`, authenticated per chunk by the core. An empty
+// array means end of stream; null means the read failed.
+JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeReadRange(
+    JNIEnv* env, jobject, jlong id, jlong offset, jint size) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault || size <= 0) return nullptr;
+    auto bytes = g_vault->read_video_range(static_cast<std::int64_t>(id),
+        static_cast<std::uint64_t>(offset), static_cast<std::size_t>(size));
+    if (!bytes) return nullptr;
+    auto& data = bytes.value();
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(data.size()));
+    if (out != nullptr && !data.empty()) {
+        env->SetByteArrayRegion(out, 0, static_cast<jsize>(data.size()),
+            reinterpret_cast<const jbyte*>(data.data()));
     }
     return out;
 }

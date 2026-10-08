@@ -1,7 +1,9 @@
+@file:OptIn(androidx.media3.common.util.UnstableApi::class)
+
 package org.megavideoprotect.app
 
-import android.graphics.BitmapFactory
-import androidx.compose.foundation.Canvas
+import android.graphics.Bitmap
+import android.view.ViewGroup
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.layout.Arrangement
@@ -13,86 +15,103 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
-import androidx.compose.material3.CircularProgressIndicator
-import androidx.compose.material3.Slider
-import androidx.compose.material3.SliderDefaults
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
+import androidx.compose.runtime.DisposableEffect
+import androidx.compose.runtime.LaunchedEffect
 import androidx.compose.runtime.getValue
-import androidx.compose.runtime.mutableLongStateOf
 import androidx.compose.runtime.mutableStateOf
 import androidx.compose.runtime.remember
-import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
-import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.asImageBitmap
+import androidx.compose.ui.graphics.toArgb
 import androidx.compose.ui.layout.ContentScale
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
-import androidx.compose.foundation.shape.RoundedCornerShape
+import androidx.compose.ui.viewinterop.AndroidView
+import androidx.media3.common.MediaItem
+import androidx.media3.common.PlaybackException
+import androidx.media3.common.Player
+import androidx.media3.exoplayer.ExoPlayer
+import androidx.media3.exoplayer.source.ProgressiveMediaSource
+import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
-import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
+import java.nio.ByteBuffer
 
 /**
- * Player: mirrors the desktop player window. Decodes a frame at the seek
- * position through the JNI bridge (FFmpeg over the encrypted stream — nothing
- * touches disk). Audio playback is not wired up in this first build.
+ * Player: ExoPlayer (platform hardware decoders) reading the vault through
+ * [VaultDataSource], so video *and* audio play straight from the encrypted
+ * packages — the plaintext never lands on disk. When the platform decoder
+ * cannot handle the codec, the core's FFmpeg decoder supplies a representative
+ * frame instead of a black screen. Rotate the phone for landscape; seek/volume
+ * live in the player controls.
  */
 @Composable
 fun PlayerScreen(
     videoId: Long,
     name: String,
-    durationMs: Long,
     onBack: () -> Unit,
 ) {
-    val scope = rememberCoroutineScope()
-    var frame by remember { mutableStateOf<android.graphics.Bitmap?>(null) }
-    var positionMs by remember { mutableLongStateOf(0L) }
-    var seeking by remember { mutableStateOf(false) }
-    var info by remember { mutableStateOf("") }
-    var decodeError by remember { mutableStateOf<String?>(null) }
+    val context = LocalContext.current
+    var player by remember { mutableStateOf<ExoPlayer?>(null) }
+    var failure by remember { mutableStateOf<String?>(null) }
+    var poster by remember { mutableStateOf<Bitmap?>(null) }
 
-    fun decode(at: Long) {
-        seeking = true
-        decodeError = null
-        scope.launch {
-            val (bmp, note) = withContext(Dispatchers.Default) {
-                val bytes = CoreBridge.nativeDecodeFrame(videoId, at, 720)
-                val meta = runCatching { CoreBridge.nativeMediaInfo(videoId) }.getOrNull() ?: ""
-                if (bytes != null) {
-                    BitmapFactory.decodeByteArray(bytes, 0, bytes.size) to meta
-                } else null to meta
+    // Fallback poster: decoded through the core when ExoPlayer gives up.
+    LaunchedEffect(videoId, failure) {
+        if (failure != null && poster == null) {
+            poster = withContext(Dispatchers.Default) {
+                CoreBridge.nativeDecodeFrame(videoId, 0, 960)?.let(::rgbaToBitmap)
             }
-            if (bmp != null) {
-                frame = bmp
-                info = note
-            } else {
-                decodeError = "Could not decode a frame at this position."
-            }
-            seeking = false
         }
     }
 
-    Column(
-        Modifier
-            .fillMaxSize()
-            .background(Mvp.window)
-            .padding(12.dp),
-        horizontalAlignment = Alignment.CenterHorizontally,
-    ) {
+    DisposableEffect(videoId) {
+        val exo = ExoPlayer.Builder(context)
+            .setMediaSourceFactory(ProgressiveMediaSource.Factory(VaultDataSource.Factory()))
+            .build()
+        exo.setMediaItem(MediaItem.fromUri(VaultDataSource.uriFor(videoId)))
+        exo.addListener(object : Player.Listener {
+            override fun onPlayerError(error: PlaybackException) {
+                failure = "Playback failed: ${error.errorCodeName}"
+            }
+        })
+        exo.prepare()
+        exo.playWhenReady = true
+        player = exo
+        onDispose {
+            player = null
+            exo.release()
+        }
+    }
+
+    Column(Modifier.fillMaxSize().background(Mvp.window)) {
         Row(
-            Modifier.fillMaxWidth(),
-            horizontalArrangement = Arrangement.SpaceBetween,
+            Modifier
+                .fillMaxWidth()
+                .background(Mvp.headerBg)
+                .padding(horizontal = 12.dp, vertical = 6.dp),
             verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
             MvpButton("← Back", onClick = onBack)
-            Text(name, color = Mvp.title, fontSize = 17.sp, fontWeight = FontWeight.SemiBold, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f).padding(horizontal = 12.dp), textAlign = TextAlign.Center)
+            Text(
+                name,
+                color = Mvp.title,
+                fontSize = 15.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                textAlign = TextAlign.Center,
+                modifier = Modifier.weight(1f),
+            )
             Spacer(Modifier.size(70.dp))
         }
 
@@ -100,50 +119,70 @@ fun PlayerScreen(
             Modifier
                 .weight(1f)
                 .fillMaxWidth()
-                .clip(RoundedCornerShape(8.dp))
                 .background(Mvp.card),
             contentAlignment = Alignment.Center,
         ) {
-            val f = frame
-            if (f != null) {
+            val posterFrame = poster
+            if (posterFrame != null) {
                 Image(
-                    bitmap = f.asImageBitmap(),
+                    bitmap = posterFrame.asImageBitmap(),
                     contentDescription = null,
                     modifier = Modifier.fillMaxSize(),
                     contentScale = ContentScale.Fit,
                 )
-            } else if (seeking) {
-                CircularProgressIndicator(color = Mvp.accent)
             } else {
-                Text("Decode a frame with the slider", color = Mvp.description, fontSize = 13.sp)
+                AndroidView(
+                    factory = { ctx ->
+                        PlayerView(ctx).apply {
+                            useController = true
+                            setShowBuffering(PlayerView.SHOW_BUFFERING_WHEN_PLAYING)
+                            setShutterBackgroundColor(Mvp.card.toArgb())
+                            keepScreenOn = true
+                            layoutParams = ViewGroup.LayoutParams(
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                                ViewGroup.LayoutParams.MATCH_PARENT,
+                            )
+                        }
+                    },
+                    update = { view -> view.player = player },
+                    modifier = Modifier.fillMaxSize(),
+                )
             }
         }
 
-        Row(
-            Modifier.fillMaxWidth().padding(top = 10.dp),
-            verticalAlignment = Alignment.CenterVertically,
-        ) {
-            MvpButton("Seek 5s −", onClick = { decode((positionMs - 5000).coerceAtLeast(0)) }, enabled = !seeking)
-            Slider(
-                value = positionMs.toFloat(),
-                onValueChange = { positionMs = it.toLong() },
-                onValueChangeFinished = { decode(positionMs) },
-                valueRange = 0f..durationMs.coerceAtLeast(1).toFloat(),
-                enabled = durationMs > 0 && !seeking,
-                modifier = Modifier.weight(1f).padding(horizontal = 12.dp),
-                colors = SliderDefaults.colors(
-                    thumbColor = Mvp.sliderHandle,
-                    activeTrackColor = Mvp.sliderFill,
-                    inactiveTrackColor = Mvp.sliderGroove,
-                ),
+        failure?.let { message ->
+            Text(
+                if (poster == null) message else "$message — showing a decoded frame",
+                color = Mvp.errorText,
+                fontSize = 12.sp,
+                modifier = Modifier.fillMaxWidth().padding(8.dp),
             )
-            MvpButton("Seek 5s +", onClick = { decode((positionMs + 5000).coerceAtMost(durationMs)) }, enabled = !seeking)
         }
-        Text(
-            "%d:%02d / %d:%02d".format(positionMs / 60000, (positionMs / 1000) % 60, durationMs / 60000, (durationMs / 1000) % 60),
-            color = Mvp.description,
-            fontSize = 12.sp,
-        )
-        if (decodeError != null) MvpError(decodeError, Modifier.padding(top = 6.dp))
     }
+}
+
+/**
+ * The bridge returns raw RGBA plus an 8-byte little-endian width/height prefix
+ * (jni_bridge.cpp, decode_frame_at). BitmapFactory only understands *encoded*
+ * image data, which is why the old player always said "Could not decode a frame
+ * at this position" — rebuild the bitmap from the pixels instead.
+ */
+private fun rgbaToBitmap(bytes: ByteArray): Bitmap? {
+    if (bytes.size < 8) return null
+    fun u32(at: Int): Int =
+        (bytes[at].toInt() and 0xFF) or
+            ((bytes[at + 1].toInt() and 0xFF) shl 8) or
+            ((bytes[at + 2].toInt() and 0xFF) shl 16) or
+            ((bytes[at + 3].toInt() and 0xFF) shl 24)
+
+    val width = u32(0)
+    val height = u32(4)
+    if (width <= 0 || height <= 0) return null
+    val pixelBytes = width.toLong() * height.toLong() * 4L
+    if (bytes.size - 8 < pixelBytes) return null
+    return runCatching {
+        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
+        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(bytes, 8, pixelBytes.toInt()))
+        bitmap
+    }.getOrNull()
 }

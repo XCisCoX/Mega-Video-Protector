@@ -29,6 +29,7 @@ import androidx.compose.foundation.lazy.items
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.LinearProgressIndicator
 import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.LaunchedEffect
@@ -67,9 +68,11 @@ fun VaultScreen(
     var viewMode by remember { mutableStateOf(0) } // 0 Details, 1 Icons, 2 List
     var filterTagId by remember { mutableStateOf(0L) }
     var search by remember { mutableStateOf("") }
-    var busy by remember { mutableStateOf(false) }
     var error by remember { mutableStateOf<String?>(null) }
     var showSettings by remember { mutableStateOf(false) }
+    // Batch import progress: fraction of the bytes of the whole selection.
+    var importProgress by remember { mutableStateOf<Float?>(null) }
+    var importLabel by remember { mutableStateOf("") }
 
     fun refresh() {
         scope.launch {
@@ -85,30 +88,29 @@ fun VaultScreen(
 
     LaunchedEffect(Unit) { refresh() }
 
+    // Import: multi-select, streamed into the vault one file at a time with a
+    // byte-level progress bar for the whole batch (no per-file jumps).
     val importLauncher = rememberLauncherForActivityResult(
-        ActivityResultContracts.OpenDocument()
-    ) { uri: Uri? ->
-        if (uri == null) return@rememberLauncherForActivityResult
-        busy = true
+        ActivityResultContracts.OpenMultipleDocuments()
+    ) { uris: List<Uri> ->
+        if (uris.isEmpty()) return@rememberLauncherForActivityResult
         error = null
+        importProgress = 0f
+        importLabel = ""
         scope.launch {
-            val res = withContext(Dispatchers.Default) {
-                val name = queryName(context.contentResolver, uri) ?: "import.mp4"
-                val tmp = File(context.cacheDir, name)
-                try {
-                    context.contentResolver.openInputStream(uri)?.use { input ->
-                        tmp.outputStream().use { output -> input.copyTo(output) }
-                    }
-                    val r = CoreBridge.Result.parse(CoreBridge.nativeImportFile(tmp.absolutePath))
-                    tmp.delete()
-                    r
-                } catch (e: Exception) {
-                    tmp.delete()
-                    CoreBridge.Result(false, "Import failed", e.message ?: "")
+            val results = withContext(Dispatchers.IO) {
+                importBatch(context, uris) { done, total, label ->
+                    importProgress = if (total > 0L) (done.toFloat() / total.toFloat()) else 0f
+                    importLabel = label
                 }
             }
-            busy = false
-            if (res.ok) refresh() else error = res.error.ifBlank { res.detail }
+            importProgress = null
+            importLabel = ""
+            val failures = results.filter { !it.ok }
+            if (failures.isNotEmpty()) {
+                error = failures.joinToString("\n") { it.error.ifBlank { it.detail } }
+            }
+            refresh()
         }
     }
 
@@ -149,6 +151,26 @@ fun VaultScreen(
             })
         }
 
+        // Import progress (byte-level, whole batch) + error banner.
+        importProgress?.let { fraction ->
+            Column(Modifier.fillMaxWidth().background(Mvp.headerBg).padding(horizontal = 12.dp, vertical = 6.dp)) {
+                LinearProgressIndicator(
+                    progress = { fraction.coerceIn(0f, 1f) },
+                    modifier = Modifier.fillMaxWidth(),
+                    color = Mvp.primary,
+                    trackColor = Mvp.sliderGroove,
+                )
+                Text(
+                    "${(fraction * 100).toInt()}%  $importLabel",
+                    color = Mvp.description,
+                    fontSize = 11.sp,
+                    maxLines = 1,
+                    overflow = TextOverflow.Ellipsis,
+                )
+            }
+        }
+        MvpError(error, Modifier.padding(horizontal = 12.dp))
+
         if (showSettings) {
             SettingsDialog(
                 currentTags = tags,
@@ -161,6 +183,8 @@ fun VaultScreen(
             (filterTagId == 0L || v.tags.any { t -> tags.firstOrNull { it.id == filterTagId }?.name?.equals(t, true) == true }) &&
                 (search.isBlank() || v.name.contains(search, ignoreCase = true))
         }
+
+        val busy = importProgress != null
 
         Box(Modifier.weight(1f).fillMaxWidth()) {
             when (viewMode) {
@@ -191,6 +215,58 @@ private fun queryName(resolver: android.content.ContentResolver, uri: Uri): Stri
             if (idx >= 0 && c.moveToFirst()) c.getString(idx) else null
         }
     }.getOrNull()
+}
+
+/**
+ * Copies each picked document into the app cache (streamed in 64 KiB blocks so
+ * the progress bar tracks real bytes) and imports it into the vault. Files are
+ * processed one at a time — the vault allows a single writer — while the bar
+ * spans the whole selection, so it never jumps per file.
+ */
+private suspend fun importBatch(
+    context: android.content.Context,
+    uris: List<Uri>,
+    onProgress: (done: Long, total: Long, label: String) -> Unit,
+): List<CoreBridge.Result> {
+    // Sizes up front (when the provider reports them) so the aggregate bar is
+    // proportional across the batch.
+    val declared = uris.map { uri ->
+        runCatching {
+            context.contentResolver.openAssetFileDescriptor(uri, "r")?.use { it.length }
+        }.getOrNull() ?: -1L
+    }
+    val knownTotal = declared.filter { it > 0L }.sum()
+    var done = 0L
+    val results = ArrayList<CoreBridge.Result>(uris.size)
+
+    uris.forEachIndexed { index, uri ->
+        val name = queryName(context.contentResolver, uri) ?: "import_$index.mp4"
+        val tmp = File(context.cacheDir, "import_$index-$name")
+        val result = try {
+            context.contentResolver.openInputStream(uri)?.use { input ->
+                tmp.outputStream().use { output ->
+                    val block = ByteArray(1 shl 16)
+                    while (true) {
+                        val read = input.read(block)
+                        if (read < 0) break
+                        output.write(block, 0, read)
+                        done += read.toLong()
+                        onProgress(done, maxOf(knownTotal, done), name)
+                    }
+                }
+            } ?: run {
+                results.add(CoreBridge.Result(false, "Could not open $name", ""))
+                return@forEachIndexed
+            }
+            CoreBridge.Result.parse(CoreBridge.nativeImportFile(tmp.absolutePath))
+        } catch (e: Exception) {
+            CoreBridge.Result(false, "Import failed: $name", e.message ?: "")
+        } finally {
+            tmp.delete()
+        }
+        results.add(result)
+    }
+    return results
 }
 
 @Composable

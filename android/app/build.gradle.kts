@@ -75,4 +75,8 @@ dependencies {
     implementation("androidx.core:core-ktx:1.16.0")
     implementation("androidx.lifecycle:lifecycle-runtime-ktx:2.9.0")
     implementation("androidx.lifecycle:lifecycle-viewmodel-compose:2.9.0")
+    // Real playback (hardware-decoded video + audio) straight from the vault:
+    // ExoPlayer reads the decrypted stream through VaultDataSource (JNI).
+    implementation("androidx.media3:media3-exoplayer:1.6.1")
+    implementation("androidx.media3:media3-ui:1.6.1")
 }

@@ -20,12 +20,19 @@
 set -euo pipefail
 
 REPO="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
+# On Windows hosts the NDK, CMake and the autotools/ffmpeg configure scripts are
+# all native programs: give them drive-letter paths (C:/...) instead of the
+# MSYS form (/c/...), which they cannot resolve. PATH entries the shell itself
+# searches must stay in POSIX form, or extensionless executables go missing.
+win_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -m "$1"; else printf '%s' "$1"; fi; }
+posix_path() { if command -v cygpath >/dev/null 2>&1; then cygpath -u "$1"; else printf '%s' "$1"; fi; }
+REPO="$(win_path "$REPO")"
 OUT="$REPO/out/android-arm64"
 SRC="$OUT/src"
 PREFIX="$OUT/prefix"
 API="${ANDROID_PLATFORM_API:-26}"
 ABI=arm64-v8a
-JOBS="${JOBS:-$(nproc)}"
+JOBS="${JOBS:-$(nproc 2>/dev/null || echo "${NUMBER_OF_PROCESSORS:-4}")}"
 
 echo "== locating NDK =="
 NDK=""
@@ -40,28 +47,46 @@ echo "NDK: $NDK"
 # OpenSSL's android-arm64 Configure target resolves the NDK through this env var.
 export ANDROID_NDK_ROOT="$NDK"
 
-TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+TOOLCHAIN=""
+for host_dir in linux-x86_64 windows-x86_64 darwin-x86_64; do
+    if [ -d "$NDK/toolchains/llvm/prebuilt/$host_dir" ]; then
+        TOOLCHAIN="$NDK/toolchains/llvm/prebuilt/$host_dir"
+        break
+    fi
+done
+[ -n "$TOOLCHAIN" ] || { echo "ERROR: no NDK host toolchain under $NDK/toolchains/llvm/prebuilt"; exit 1; }
+# Host executables carry .exe on Windows.
+EXE=""
+case "$(uname -s)" in MINGW*|MSYS*|CYGWIN*) EXE=".exe";; esac
+
 # OpenSSL's android target looks for <arch>-linux-android-gcc on PATH, but the
-# NDK ships only clang. Provide gcc/g++-named shims pointing at clang (clang
-# derives the android target from the argv[0] triple prefix).
+# NDK ships only clang — and its <triple><api>-clang launchers are POSIX shell
+# wrappers on Linux yet .cmd scripts on Windows. Provide sh-executable
+# gcc/g++-named shims that call clang with an explicit android target, so one
+# mechanism works on every host.
 GCCSHIM="$OUT/gccshim"
 mkdir -p "$GCCSHIM"
-[ -e "$GCCSHIM/aarch64-linux-android-gcc" ] \
-    || ln -s "$TOOLCHAIN/bin/aarch64-linux-android$API-clang" "$GCCSHIM/aarch64-linux-android-gcc"
-[ -e "$GCCSHIM/aarch64-linux-android-g++" ] \
-    || ln -s "$TOOLCHAIN/bin/aarch64-linux-android$API-clang++" "$GCCSHIM/aarch64-linux-android-g++"
-export PATH="$GCCSHIM:$TOOLCHAIN/bin:$PATH"
-CC="$TOOLCHAIN/bin/aarch64-linux-android$API-clang"
-CXX="$TOOLCHAIN/bin/aarch64-linux-android$API-clang++"
-AR="$TOOLCHAIN/bin/llvm-ar"
-RANLIB="$TOOLCHAIN/bin/llvm-ranlib"
-NM="$TOOLCHAIN/bin/llvm-nm"
-STRIP="$TOOLCHAIN/bin/llvm-strip"
+make_shim() { # <shim> <compiler>
+    printf '#!/bin/sh\nexec "%s" --target=aarch64-linux-android%s "$@"\n' "$2" "$API" > "$1"
+    chmod +x "$1"
+}
+make_shim "$GCCSHIM/aarch64-linux-android-gcc" "$TOOLCHAIN/bin/clang$EXE"
+make_shim "$GCCSHIM/aarch64-linux-android-g++" "$TOOLCHAIN/bin/clang++$EXE"
+export PATH="$(posix_path "$GCCSHIM"):$(posix_path "$TOOLCHAIN/bin"):$PATH"
+CC="$GCCSHIM/aarch64-linux-android-gcc"
+CXX="$GCCSHIM/aarch64-linux-android-g++"
+AR="$TOOLCHAIN/bin/llvm-ar$EXE"
+RANLIB="$TOOLCHAIN/bin/llvm-ranlib$EXE"
+NM="$TOOLCHAIN/bin/llvm-nm$EXE"
+STRIP="$TOOLCHAIN/bin/llvm-strip$EXE"
 TOOLCHAIN_FILE="$NDK/build/cmake/android.toolchain.cmake"
 # The NDK container ships CMake/ninja inside the SDK; fall back to PATH.
 CMAKE_BIN="${CMAKE_BIN:-$(command -v cmake || echo /opt/android-sdk-linux/cmake/3.31.6/bin/cmake)}"
 NINJA="${NINJA:-$(command -v ninja || echo /opt/android-sdk-linux/cmake/3.31.6/bin/ninja)}"
 [ -x "$CMAKE_BIN" ] || { echo "cmake not found"; exit 1; }
+# Windows hosts have no `make`; GNU make is usually installed as mingw32-make.
+MAKE="${MAKE:-$(command -v make || command -v mingw32-make || command -v gmake)}"
+[ -x "$MAKE" ] || { echo "ERROR: GNU make not found (install make / mingw32-make)"; exit 1; }
 
 mkdir -p "$SRC" "$PREFIX"
 
@@ -72,33 +97,51 @@ if [ -n "${HOST_UID:-}" ]; then
 fi
 
 # The NDK container image ships CMake/ninja but not make (openssl, sqlcipher
-# and ffmpeg all build with make) or tclsh (sqlcipher's build system needs it
-# to generate files). Install them when missing (needs root — run the
-# container without --user).
-if ! command -v make >/dev/null 2>&1 || ! command -v tclsh >/dev/null 2>&1 \
-        || ! command -v gcc >/dev/null 2>&1 || ! command -v qemu-aarch64 >/dev/null 2>&1; then
-    echo "== installing make + tcl + gcc + qemu-user =="
+# and ffmpeg all build with make), a host compiler for sqlcipher's
+# lemon/mksourceid generators, or perl for OpenSSL's Configure. Install them
+# when missing (needs root — run the container without --user). tclsh and
+# qemu-user are optional: sqlcipher is configured --disable-tcl, and qemu only
+# executes the aarch64 test binaries.
+missing_tools=""
+for tool in gcc perl; do
+    command -v "$tool" >/dev/null 2>&1 || missing_tools="$missing_tools $tool"
+done
+if [ -n "$missing_tools" ]; then
+    echo "== installing missing build tools:$missing_tools =="
     if command -v apt-get >/dev/null 2>&1; then
-        apt-get update -qq >/dev/null && apt-get install -y -qq make tcl gcc libc6-dev qemu-user >/dev/null
+        apt-get update -qq >/dev/null && apt-get install -y -qq make tcl gcc libc6-dev perl qemu-user >/dev/null
     elif command -v apk >/dev/null 2>&1; then
-        apk add --no-cache make tcl gcc qemu-user >/dev/null
+        apk add --no-cache make tcl gcc perl qemu-user >/dev/null
     else
-        echo "ERROR: build tools not found and no package manager available"; exit 1
+        echo "ERROR: build tools not found and no package manager available"
+        echo "       missing:$missing_tools"
+        echo "       PATH=$PATH"
+        exit 1
     fi
 fi
+command -v tclsh >/dev/null 2>&1 \
+    || echo "note: tclsh not found — fine, sqlcipher is built with --disable-tcl"
+command -v qemu-aarch64 >/dev/null 2>&1 \
+    || echo "note: qemu-aarch64 not found — test binaries will be built but not executed"
 
 fetch() { # <url> <name>
     local url="$1" name="$2"
     local archive="$SRC/$name.archive"
+    # Windows/schannel aborts every HTTPS transfer with CRYPT_E_REVOCATION_OFFLINE
+    # when the certificate revocation server is unreachable; skip the CRL check.
+    local tls_flags=""
+    [ -n "$EXE" ] && tls_flags="--ssl-no-revoke"
     if [ ! -f "$archive" ]; then
         echo "== fetching $name =="
-        curl -sL --max-time 300 -A "Mozilla/5.0" -o "$archive" "$url"
+        curl -sL $tls_flags --max-time 300 -A "Mozilla/5.0" -o "$archive" "$url"
     fi
     if [ ! -f "$SRC/$name/.extracted" ]; then
         rm -rf "$SRC/$name"
         mkdir -p "$SRC/$name"
         # -f auto-detects gzip/xz, so one code path covers all tarballs.
-        tar -xf "$archive" -C "$SRC/$name" --strip-components=1
+        # GNU tar on Windows reads a "C:/..." argument as a remote host:path
+        # (and dies with "Cannot connect to C:"), so hand it POSIX paths.
+        tar -xf "$(posix_path "$archive")" -C "$(posix_path "$SRC/$name")" --strip-components=1
         touch "$SRC/$name/.extracted"
     fi
 }
@@ -119,11 +162,14 @@ if [ ! -f "$PREFIX/lib/libcrypto.a" ]; then
     fetch "https://codeload.github.com/openssl/openssl/tar.gz/refs/tags/openssl-3.0.16" openssl
     pushd "$SRC/openssl" >/dev/null
     echo "== building openssl (android-arm64, static) =="
-    ./Configure android-arm64 -D__ANDROID_API__=$API \
+    # $ANDROID_NDK_ROOT is handed over in POSIX form for this step only:
+    # openssl's 15-android.conf matches which("clang") against "$ndk/.../prebuilt/"
+    # and the MSYS perl returns POSIX paths, so a C:/ form never matches.
+    ANDROID_NDK_ROOT="$(posix_path "$NDK")" ./Configure android-arm64 -D__ANDROID_API__=$API \
         --prefix="$PREFIX" --openssldir="$PREFIX/ssl" \
         no-shared no-tests >/dev/null
-    make -j"$JOBS" >/dev/null
-    make install_sw >/dev/null
+    "$MAKE" -j"$JOBS" >/dev/null
+    "$MAKE" install_sw >/dev/null
     popd >/dev/null
 fi
 
@@ -151,8 +197,8 @@ if [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     ./configure --host=aarch64-linux-android \
         --prefix="$PREFIX" --enable-static --disable-shared \
         CC="$CC" >/dev/null
-    make -j"$JOBS" >/dev/null
-    make install >/dev/null
+    "$MAKE" -j"$JOBS" >/dev/null
+    "$MAKE" install >/dev/null
     popd >/dev/null
 fi
 # NOTE: libsodium's bundled argon2 exports the SAME phc argon2* API, so the
@@ -190,11 +236,11 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
     # opcodes.h/keywordhash.h as prerequisites), and stale 0-byte outputs
     # from earlier failed runs would otherwise be picked up.
     rm -f opcodes.h opcodes.c keywordhash.h
-    make -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
+    "$MAKE" -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
     # Build ONLY the static library, not the `sqlcipher` shell binary: the
     # shell links the codec against Android's logcat logging and would need
     # -llog plus a working tclsh at runtime, and nothing uses it here.
-    make -j"$JOBS" libsqlcipher.la >/dev/null
+    "$MAKE" -j"$JOBS" libsqlcipher.la >/dev/null
     cp .libs/libsqlcipher.a "$PREFIX/lib/"
     cp sqlite3.h "$PREFIX/include/"
     # The core includes <sqlcipher/sqlite3.h> — install the public headers
@@ -211,6 +257,10 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
     fetch "https://codeload.github.com/FFmpeg/FFmpeg/tar.gz/refs/tags/n7.1.1" ffmpeg
     pushd "$SRC/ffmpeg" >/dev/null
     echo "== building ffmpeg (android-arm64, lean) =="
+    # The app plays real phone videos, so the codec/container set must cover
+    # them — the previous mjpeg+matroska-only build could not even probe an
+    # MP4/H.264 file, which left the gallery metadata empty and every thumbnail
+    # and frame decode failing. Encoders stay minimal (MJPEG for thumbnails).
     ./configure \
         --cc="$CC" --cxx="$CXX" --ar="$AR" --nm="$NM" --ranlib="$RANLIB" --strip="$STRIP" \
         --target-os=android --arch=aarch64 --enable-cross-compile --enable-pic \
@@ -218,12 +268,14 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
         --disable-everything \
         --enable-avcodec --enable-avformat --enable-avutil --enable-swscale --enable-swresample \
         --enable-encoder=mjpeg --enable-muxer=matroska \
-        --enable-decoder=mjpeg --enable-demuxer=matroska \
-        --enable-parser=mjpeg --enable-protocol=file \
+        --enable-decoder=mjpeg,h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1,theora,aac,mp3,vorbis,opus,flac,pcm_s16le \
+        --enable-demuxer=matroska,mov,mpegts,mpegps,avi,flv,ogg,image2,mjpeg \
+        --enable-parser=mjpeg,h264,hevc,mpeg4video,mpegvideo,vp8,vp9,av1,aac,flac,opus,vorbis \
+        --enable-protocol=file \
         --enable-small --disable-zlib --disable-bzlib --disable-lzma --disable-iconv \
         --prefix="$PREFIX" >/dev/null
-    make -j"$JOBS" >/dev/null
-    make install >/dev/null
+    "$MAKE" -j"$JOBS" >/dev/null
+    "$MAKE" install >/dev/null
     popd >/dev/null
 fi
 

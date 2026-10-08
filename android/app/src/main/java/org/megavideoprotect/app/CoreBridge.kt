@@ -29,6 +29,9 @@ object CoreBridge {
     external fun nativeRemoveTag(videoId: Long, tagId: Long): String
     external fun nativeDeleteTag(tagId: Long): String
     external fun nativeDecodeFrame(id: Long, positionMs: Long, maxDimension: Int): ByteArray?
+    external fun nativeCreateTag(name: String): String
+    external fun nativeVideoSize(id: Long): Long
+    external fun nativeReadRange(id: Long, offset: Long, size: Int): ByteArray?
     external fun nativeClose()
 
     class Result(val ok: Boolean, val error: String, val detail: String) {

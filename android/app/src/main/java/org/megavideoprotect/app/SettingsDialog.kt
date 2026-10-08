@@ -65,9 +65,9 @@ fun SettingsDialog(
         tagError = null
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeAddTag(-1, newTag.trim()))
+                CoreBridge.Result.parse(CoreBridge.nativeCreateTag(newTag.trim()))
             }
-            if (res.ok) { newTag = ""; onChanged() } else tagError = res.error
+            if (res.ok) { newTag = ""; onChanged() } else tagError = res.error.ifBlank { res.detail }
         }
     }
 
