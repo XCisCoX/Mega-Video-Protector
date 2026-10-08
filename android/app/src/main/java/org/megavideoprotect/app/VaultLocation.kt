@@ -38,10 +38,11 @@ object VaultLocation {
             .edit().putString(KEY_PATH, path).apply()
     }
 
-    /** Short label for the picker: sandbox vs. shared storage / SD card. */
+    /** Short label for the picker: sandbox vs. per-volume shared storage. */
     fun label(context: Context, path: String): String = when {
         path == context.filesDir.absolutePath -> "App-private (recommended)"
-        path.contains("/Android/data/") -> "Shared storage (visible over USB)"
+        path.contains("/Android/data/") ->
+            "Shared storage " + path.substringBefore("/Android/data/")
         else -> path
     }
 }

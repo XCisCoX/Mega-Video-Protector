@@ -118,6 +118,33 @@ Mirrors that work from Iran (the paths this build was validated against):
 `maven.aliyun.com/repository/{google,central,gradle-plugin}` (Maven), and
 `codeload.github.com` (dependency sources). `dl.google.com` is filtered.
 
+## CI (GitHub Actions)
+
+`.github/workflows/android-build.yml` builds the same arm64-v8a debug APK on
+every push to `main` (plus PRs and manual `workflow_dispatch`), and is the only
+workflow that touches Android — `release.yml`/`beta.yml` are desktop releases
+triggered by tag or by hand.
+
+What it does, in order: JDK 21 and the real Android SDK (platform 36,
+build-tools 35.0.0, NDK 30.0.14904198 from the stable channel, CMake 3.22.1) via
+`sdkmanager`; `scripts/android/build-android-core.sh`, which also **runs the
+aarch64 test suites under qemu-user and fails the job if one fails**; then
+`./gradlew assembleDebug` with `MVP_ANDROID_PREFIX` pointing at the freshly built
+`out/android-arm64/prefix`.
+
+Three caches keep it bearable: the SDK packages (the NDK alone is ~1 GB), the
+cross-built deps + core (`out/android-arm64`, keyed on the build script and
+`core/**`), and `~/.gradle`. A cold run is ~20-25 min; a warm one is ~5 min. A
+newer push cancels an in-flight run.
+
+Before uploading, the job asserts the APK really carries a working native core:
+`lib/arm64-v8a/libmvpcore.so` and `classes.dex` present, and every JNI entry
+point the Kotlin side declares exported from the `.so`. A broken native link
+otherwise produces a "successful" build with a dead core.
+
+The artifact is `MegaVideoProtect-native-debug` (30-day retention). To build
+without pushing: Actions → Android Build → Run workflow.
+
 ## Project layout (Android)
 
 ```text

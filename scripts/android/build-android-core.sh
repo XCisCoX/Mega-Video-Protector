@@ -255,6 +255,23 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
     popd >/dev/null
 fi
 
+# --- zlib (FFmpeg's PNG/TIFF decoders) -------------------------------------
+# Android ships no linkable system zlib for static builds, so PNG (screenshots!)
+# and TIFF images cannot be decoded without this. Tiny and quick.
+if [ ! -f "$PREFIX/lib/libz.a" ]; then
+    fetch "https://codeload.github.com/madler/zlib/tar.gz/refs/tags/v1.3.1" zlib
+    pushd "$SRC/zlib" >/dev/null
+    echo "== building zlib (android-arm64, static) =="
+    # CFLAGS must carry -fPIC: libz.a is linked into libmvpcore.so, and lld
+    # refuses non-PIC relocations in a shared object (z_errmsg, zError).
+    CHOST=aarch64-linux-android CC="$CC" AR="$AR" RANLIB="$RANLIB" \
+        CFLAGS="-O3 -fPIC" \
+        ./configure --static --prefix="$PREFIX" >/dev/null
+    "$MAKE" -j"$JOBS" >/dev/null
+    "$MAKE" install >/dev/null
+    popd >/dev/null
+fi
+
 # --- ffmpeg (lean) ---------------------------------------------------------
 if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
     # GitHub mirror: ffmpeg.org is intermittently unreachable from some
@@ -272,6 +289,13 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
     # C-only FFmpeg is plenty for what the app uses it for (probing container
     # metadata, decoding one frame for thumbnails, MJPEG-encoding it); actual
     # playback is hardware-decoded by MediaCodec.
+    #
+    # The *_pipe demuxers were a dead end: FFmpeg 7.x has no such component
+    # names (configure ignored them). Images are handled instead by the core
+    # passing a filename hint so the extension-keyed `image2` demuxer applies.
+    # --enable-zlib is required for the PNG/APNG decoders (they select
+    # inflate_wrapper, which needs zlib): --disable-autodetect turns off
+    # automatic external-library detection, so zlib must be asked for by name.
     ./configure \
         --cc="$CC" --cxx="$CXX" --ar="$AR" --nm="$NM" --ranlib="$RANLIB" --strip="$STRIP" \
         --target-os=android --arch=aarch64 --enable-cross-compile --enable-pic \
@@ -279,11 +303,13 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
         --disable-everything \
         --enable-avcodec --enable-avformat --enable-avutil --enable-swscale --enable-swresample \
         --enable-encoder=mjpeg --enable-muxer=matroska \
-        --enable-decoder=mjpeg,h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1,theora,aac,mp3,vorbis,opus,flac,pcm_s16le \
-        --enable-demuxer=matroska,mov,mpegts,mpegps,avi,flv,ogg,image2,mjpeg \
-        --enable-parser=mjpeg,h264,hevc,mpeg4video,mpegvideo,vp8,vp9,av1,aac,flac,opus,vorbis \
+        --enable-decoder=mjpeg,h264,hevc,mpeg4,mpeg2video,vp8,vp9,av1,theora,aac,mp3,vorbis,opus,flac,pcm_s16le,png,apng,webp,gif,bmp,tiff \
+        --enable-demuxer=matroska,mov,mpegts,mpegps,avi,flv,ogg,gif,image2,mjpeg \
+        --enable-parser=mjpeg,h264,hevc,mpeg4video,mpegvideo,vp8,vp9,av1,aac,flac,opus,vorbis,png \
         --enable-protocol=file \
-        --enable-small --disable-zlib --disable-bzlib --disable-lzma --disable-iconv \
+        --extra-cflags="-I$PREFIX/include" --extra-ldflags="-L$PREFIX/lib" \
+        --enable-small --disable-bzlib --disable-lzma --disable-iconv \
+        --enable-zlib \
         --disable-asm \
         --prefix="$PREFIX" >/dev/null
     "$MAKE" -j"$JOBS" >/dev/null

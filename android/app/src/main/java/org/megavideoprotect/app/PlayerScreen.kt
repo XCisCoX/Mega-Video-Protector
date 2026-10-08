@@ -78,6 +78,9 @@ fun PlayerScreen(
             .setMediaSourceFactory(ProgressiveMediaSource.Factory(VaultDataSource.Factory()))
             .build()
         exo.setMediaItem(MediaItem.fromUri(VaultDataSource.uriFor(videoId)))
+        // Loop the single video by default: the vault is a curated library, and
+        // restarting the same clip is the common case on a phone.
+        exo.repeatMode = Player.REPEAT_MODE_ONE
         exo.addListener(object : Player.Listener {
             override fun onPlayerError(error: PlaybackException) {
                 failure = "Playback failed: ${error.errorCodeName}"
@@ -161,28 +164,6 @@ fun PlayerScreen(
     }
 }
 
-/**
- * The bridge returns raw RGBA plus an 8-byte little-endian width/height prefix
- * (jni_bridge.cpp, decode_frame_at). BitmapFactory only understands *encoded*
- * image data, which is why the old player always said "Could not decode a frame
- * at this position" — rebuild the bitmap from the pixels instead.
- */
-private fun rgbaToBitmap(bytes: ByteArray): Bitmap? {
-    if (bytes.size < 8) return null
-    fun u32(at: Int): Int =
-        (bytes[at].toInt() and 0xFF) or
-            ((bytes[at + 1].toInt() and 0xFF) shl 8) or
-            ((bytes[at + 2].toInt() and 0xFF) shl 16) or
-            ((bytes[at + 3].toInt() and 0xFF) shl 24)
+// rgbaToBitmap lives in ImageViewerScreen.kt: the player, the viewer and the
+// thumbnails all rebuild bitmaps from the bridge's raw RGBA the same way.
 
-    val width = u32(0)
-    val height = u32(4)
-    if (width <= 0 || height <= 0) return null
-    val pixelBytes = width.toLong() * height.toLong() * 4L
-    if (bytes.size - 8 < pixelBytes) return null
-    return runCatching {
-        val bitmap = Bitmap.createBitmap(width, height, Bitmap.Config.ARGB_8888)
-        bitmap.copyPixelsFromBuffer(ByteBuffer.wrap(bytes, 8, pixelBytes.toInt()))
-        bitmap
-    }.getOrNull()
-}

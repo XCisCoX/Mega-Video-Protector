@@ -39,6 +39,7 @@ target_link_libraries(mvpcore
     ${MVP_ANDROID_PREFIX}/lib/libavutil.a
     ${MVP_ANDROID_PREFIX}/lib/libswscale.a
     ${MVP_ANDROID_PREFIX}/lib/libswresample.a
+    ${MVP_ANDROID_PREFIX}/lib/libz.a
     log
     atomic
     m

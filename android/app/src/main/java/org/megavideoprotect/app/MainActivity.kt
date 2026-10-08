@@ -39,12 +39,15 @@ class MainActivity : ComponentActivity() {
                     mutableStateOf<Screen>(if (vaultExists) Screen.Login else Screen.Setup)
                 }
 
-                // System back / gesture: leave the player, lock the vault.
+                // System back / gesture: leave the media player or the image
+                // viewer, lock the vault.
                 BackHandler(enabled = screen !is Screen.Setup) {
                     screen = when (screen) {
                         is Screen.Player -> Screen.Vault
+                        is Screen.Image -> Screen.Vault
                         is Screen.Vault -> {
                             runCatching { CoreBridge.nativeLock() }
+                            GalleryCache.clear()
                             Screen.Login
                         }
                         else -> Screen.Setup
@@ -71,9 +74,22 @@ class MainActivity : ComponentActivity() {
                                 runCatching { CoreBridge.nativeLock() }
                                 screen = Screen.Login
                             },
-                            onPlay = { id, name -> screen = Screen.Player(id, name) },
+                            // A still image has no stream to play, so it opens in
+                            // the image viewer; everything else in the player.
+                            onPlay = { id, name ->
+                                screen = if (isImageName(name)) {
+                                    Screen.Image(id, name)
+                                } else {
+                                    Screen.Player(id, name)
+                                }
+                            },
                         )
                         is Screen.Player -> PlayerScreen(
+                            videoId = current.videoId,
+                            name = current.name,
+                            onBack = { screen = Screen.Vault },
+                        )
+                        is Screen.Image -> ImageViewerScreen(
                             videoId = current.videoId,
                             name = current.name,
                             onBack = { screen = Screen.Vault },

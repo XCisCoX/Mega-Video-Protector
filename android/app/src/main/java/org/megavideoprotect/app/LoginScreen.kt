@@ -22,6 +22,7 @@ import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
@@ -32,9 +33,13 @@ import kotlinx.coroutines.withContext
 @Composable
 fun LoginScreen(
     vaultLocation: String,
+    locationOptions: List<String>,
     onUnlocked: () -> Unit,
     onBack: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var location by remember { mutableStateOf(vaultLocation) }
+    var showFolderPicker by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
@@ -49,7 +54,7 @@ fun LoginScreen(
         busy = true
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeOpenVault(vaultLocation, password))
+                CoreBridge.Result.parse(CoreBridge.nativeOpenVault(location, password))
             }
             busy = false
             if (res.ok) onUnlocked() else error = res.error.ifBlank { res.detail }
@@ -72,8 +77,26 @@ fun LoginScreen(
             MvpCard(Modifier.widthIn(max = 420.dp).fillMaxWidth()) {
                 MvpTitle("Unlock Mega Video Protect")
                 MvpDescription("Enter the vault password to unlock the encrypted database.")
+                MvpDescription("Vault storage folder")
+                MvpCombo(
+                    selected = VaultLocation.label(context, location),
+                    items = locationOptions.map { VaultLocation.label(context, it) },
+                    onSelect = { label ->
+                        val index = locationOptions.map { VaultLocation.label(context, it) }.indexOf(label)
+                        if (index >= 0) {
+                            location = locationOptions[index]
+                            VaultLocation.save(context, location)
+                        }
+                    },
+                )
+                MvpButton(
+                    "Choose folder…",
+                    onClick = { showFolderPicker = true },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 MvpInput(
-                    value = vaultLocation,
+                    value = location,
                     onValueChange = {},
                     placeholder = "Vault storage folder",
                     enabled = false,
@@ -97,6 +120,16 @@ fun LoginScreen(
                 }
                 MvpButton("Unlock vault", onClick = { unlock() }, primary = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
                 MvpButton("Back", onClick = onBack, enabled = !busy, modifier = Modifier.fillMaxWidth())
+                if (showFolderPicker) {
+                    FolderPickerDialog(
+                        onDismiss = { showFolderPicker = false },
+                        onPicked = { picked ->
+                            location = picked
+                            VaultLocation.save(context, picked)
+                            showFolderPicker = false
+                        },
+                    )
+                }
             }
         }
     }

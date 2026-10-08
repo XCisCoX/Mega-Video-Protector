@@ -179,6 +179,24 @@ struct RangeReader {
     Vault* vault{nullptr};
     std::int64_t video_id{0};
     std::uint64_t pos{0};
+    // Plaintext size of the entry, resolved once at construction. FFmpeg's image
+    // demuxers size the stream before probing (avio_size / SEEK_END) and refuse
+    // to open without it, which is why stills came back as "could not decode"
+    // even with the right filename hint.
+    std::uint64_t size{0};
+
+    RangeReader(Vault* v, const std::int64_t id, const std::uint64_t start)
+        : vault(v), video_id(id), pos(start) {
+        if (vault == nullptr) return;
+        auto list = vault->list_videos();
+        if (!list) return;
+        for (const auto& video : list.value()) {
+            if (video.id == video_id) {
+                size = video.original_size;
+                return;
+            }
+        }
+    }
 
     std::optional<std::size_t> read(std::span<unsigned char> dst) {
         auto got = vault->read_video_range(video_id, pos, dst.size());
@@ -206,12 +224,21 @@ int read_packet(void* opaque, unsigned char* buffer, const int size) {
 
 std::int64_t seek_packet(void* opaque, const std::int64_t offset, const int whence) {
     auto* reader = static_cast<RangeReader*>(opaque);
-    if (whence == AVSEEK_SIZE) return -1;  // plaintext size unknown to the bridge
+    // Mirrors the core's reader (core/src/media.cpp): AVSEEK_SIZE and SEEK_END
+    // must both work. Reporting "size unknown" made the image demuxers fail to
+    // open, so every photo the viewer tried came back undecodable.
+    if (whence == AVSEEK_SIZE) {
+        return reader->size > 0U ? static_cast<std::int64_t>(reader->size) : -1;
+    }
     std::int64_t target = 0;
     switch (whence) {
         case SEEK_SET: target = offset; break;
         case SEEK_CUR: target = static_cast<std::int64_t>(reader->position()) + offset; break;
-        default: return -1;  // SEEK_END unsupported (size unknown)
+        case SEEK_END:
+            if (reader->size == 0U) return -1;
+            target = static_cast<std::int64_t>(reader->size) + offset;
+            break;
+        default: return -1;
     }
     if (target < 0) target = 0;
     reader->seek(static_cast<std::uint64_t>(target));
@@ -220,7 +247,15 @@ std::int64_t seek_packet(void* opaque, const std::int64_t offset, const int when
 
 // --- frame decode (mirrors core/src/media.cpp) ------------------------------
 
-struct AvIoDeleter { void operator()(AVIOContext* c) const { avio_context_free(&c); } };
+struct AvIoDeleter {
+    void operator()(AVIOContext* c) const {
+        if (c == nullptr) return;
+        // avio_context_free() does not release the buffer handed to
+        // avio_alloc_context(), so free it here or every decode leaks 64 KiB.
+        if (c->buffer != nullptr) av_freep(&c->buffer);
+        avio_context_free(&c);
+    }
+};
 struct AvFormatDeleter { void operator()(AVFormatContext* c) const { avformat_close_input(&c); } };
 struct AvCodecDeleter { void operator()(AVCodecContext* c) const { avcodec_free_context(&c); } };
 struct AvFrameDeleter { void operator()(AVFrame* f) const { av_frame_free(&f); } };
@@ -229,6 +264,29 @@ struct SwsDeleter { void operator()(SwsContext* c) const { sws_freeContext(c); }
 
 constexpr std::size_t kAvioBufferSize = 64U * 1024U;
 constexpr std::int64_t kMaxDecodePackets = 600;
+
+// Opens the input, retrying with image filename hints so the extension-keyed
+// demuxers (image2) can identify a bare still: the vault streams through a
+// custom AVIO that has no filename, so a PNG/WebP/BMP would otherwise be
+// undemuxable and the viewer would refuse a perfectly good picture.
+//
+// Ownership: avformat_open_input() frees the context and NULLs the pointer when
+// it fails, so the unique_ptr is only constructed after a *successful* open.
+// Wrapping it first is a double free — it kept the freed pointer and closed it
+// again on scope exit, which is the SIGSEGV inside avformat_free_context that
+// killed the app the moment an image was opened.
+std::unique_ptr<AVFormatContext, AvFormatDeleter> open_format_with_hint(
+    AVIOContext* io, RangeReader& reader, const char* name_hint) {
+    (void)reader.seek(0);
+    AVFormatContext* raw_format = avformat_alloc_context();
+    if (raw_format == nullptr) return nullptr;
+    raw_format->pb = io;
+    raw_format->flags |= AVFMT_FLAG_CUSTOM_IO;
+    if (avformat_open_input(&raw_format, name_hint, nullptr, nullptr) < 0) {
+        return nullptr; // FFmpeg released the context already
+    }
+    return std::unique_ptr<AVFormatContext, AvFormatDeleter>(raw_format);
+}
 
 std::optional<std::vector<unsigned char>> decode_frame_at(
     Vault& vault, std::int64_t video_id, std::int64_t position_ms, std::uint32_t max_dimension) {
@@ -246,13 +304,20 @@ std::optional<std::vector<unsigned char>> decode_frame_at(
     std::unique_ptr<AVIOContext, AvIoDeleter> io(raw_io);
     raw_io->seekable = AVIO_SEEKABLE_NORMAL;
 
-    AVFormatContext* raw_format = avformat_alloc_context();
-    if (raw_format == nullptr) return std::nullopt;
-    raw_format->pb = io.get();
-    raw_format->flags |= AVFMT_FLAG_CUSTOM_IO;
-    std::unique_ptr<AVFormatContext, AvFormatDeleter> format(raw_format);
+    auto format = open_format_with_hint(io.get(), reader, nullptr);
+    if (!format) {
+        static const char* const kImageHints[] = {
+            "image.png", "image.jpg", "image.webp", "image.gif",
+            "image.bmp", "image.tiff",
+        };
+        for (const char* hint : kImageHints) {
+            format = open_format_with_hint(io.get(), reader, hint);
+            if (format) break;
+        }
+    }
+    if (!format) return std::nullopt;
 
-    if (avformat_open_input(&raw_format, nullptr, nullptr, nullptr) < 0) return std::nullopt;
+    AVFormatContext* raw_format = format.get();
     if (avformat_find_stream_info(raw_format, nullptr) < 0) return std::nullopt;
 
     int stream_index = -1;
@@ -348,16 +413,12 @@ std::string videos_json() {
     std::string out = "[";
     bool first = true;
     for (const auto& v : list.value()) {
-        std::uint64_t duration_ms = 0;
-        std::uint32_t width = 0, height = 0;
-        std::string codec;
-        auto info = g_vault->media_info(v.id);
-        if (info) {
-            duration_ms = info.value().duration_ms;
-            width = info.value().width;
-            height = info.value().height;
-            codec = info.value().codec_name;
-        }
+        // Container metadata is deliberately NOT probed here. probe_media opens
+        // the package and decrypts container bytes, so listing a vault with N
+        // videos cost N FFmpeg probes and took seconds to appear on the phone.
+        // Rows carry only what the database knows; the gallery fills duration /
+        // resolution / codec per *visible* row via nativeMediaInfo, exactly as
+        // the desktop fills its Details columns asynchronously.
         std::string tags;
         auto t = g_vault->tags_for_video(v.id);
         if (t) {
@@ -372,12 +433,11 @@ std::string videos_json() {
         first = false;
         char buf[512];
         std::snprintf(buf, sizeof(buf),
-            "{\"id\":%lld,\"name\":\"%s\",\"size\":%llu,\"durationMs\":%llu,"
-            "\"width\":%u,\"height\":%u,\"codec\":\"%s\",\"importedAt\":%llu,\"tags\":[%s]}",
+            "{\"id\":%lld,\"name\":\"%s\",\"size\":%llu,"
+            "\"importedAt\":%llu,\"tags\":[%s]}",
             static_cast<long long>(v.id), json_escape(v.display_name).c_str(),
             static_cast<unsigned long long>(v.original_size),
-            static_cast<unsigned long long>(duration_ms), width, height,
-            json_escape(codec).c_str(), static_cast<unsigned long long>(v.imported_at),
+            static_cast<unsigned long long>(v.imported_at),
             tags.c_str());
         out += buf;
     }

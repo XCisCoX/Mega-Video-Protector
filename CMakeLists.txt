@@ -62,6 +62,9 @@ elseif(ANDROID)
         "${MVP_ANDROID_PREFIX}/lib/libavutil.a"
         "${MVP_ANDROID_PREFIX}/lib/libswscale.a"
         "${MVP_ANDROID_PREFIX}/lib/libswresample.a"
+        # FFmpeg's PNG/TIFF decoders need zlib; Android has no linkable system
+        # zlib for static builds, so the script builds it into the prefix.
+        "${MVP_ANDROID_PREFIX}/lib/libz.a"
     )
     set(MVP_DEP_INCLUDE_DIRS "${MVP_ANDROID_PREFIX}/include")
     # libsodium and libargon2 both define the phc argon2* API (identical

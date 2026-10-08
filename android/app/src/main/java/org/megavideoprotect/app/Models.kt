@@ -83,4 +83,6 @@ sealed interface Screen {
     data object Login : Screen
     data object Vault : Screen
     data class Player(val videoId: Long, val name: String) : Screen
+    /** A still image: shown in the image viewer, not the media player. */
+    data class Image(val videoId: Long, val name: String) : Screen
 }

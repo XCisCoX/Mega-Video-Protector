@@ -34,12 +34,17 @@ import kotlinx.coroutines.withContext
 @Composable
 fun SetupScreen(
     vaultLocation: String,
+    locationOptions: List<String>,
     onCreated: () -> Unit,
     onOpenExisting: () -> Unit,
 ) {
+    val context = LocalContext.current
+    var location by remember { mutableStateOf(vaultLocation) }
+    var showFolderPicker by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    var profile by remember { mutableStateOf("Mobile — 64 MiB, 3 iterations") }
+    // Same profiles as the desktop client (no phone-specific downgrade).
+    var profile by remember { mutableStateOf("Balanced — 256 MiB, 3 iterations") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -67,7 +72,7 @@ fun SetupScreen(
         val iters = if (profile.startsWith("High")) 4 else 3
         scope.launch {
             val res = withContext(Dispatchers.Default) {
-                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(vaultLocation, password, memKib, iters, 1))
+                CoreBridge.Result.parse(CoreBridge.nativeCreateVault(location, password, memKib, iters, 1))
             }
             busy = false
             if (res.ok) onCreated() else error = res.error.ifBlank { res.detail }
@@ -92,8 +97,26 @@ fun SetupScreen(
                     "Choose a private storage location and a strong password. " +
                         "The password is never stored."
                 )
+                MvpDescription("Vault storage folder")
+                MvpCombo(
+                    selected = VaultLocation.label(context, location),
+                    items = locationOptions.map { VaultLocation.label(context, it) },
+                    onSelect = { label ->
+                        val index = locationOptions.map { VaultLocation.label(context, it) }.indexOf(label)
+                        if (index >= 0) {
+                            location = locationOptions[index]
+                            VaultLocation.save(context, location)
+                        }
+                    },
+                )
+                MvpButton(
+                    "Choose folder…",
+                    onClick = { showFolderPicker = true },
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
                 MvpInput(
-                    value = vaultLocation,
+                    value = location,
                     onValueChange = {},
                     placeholder = "Vault storage folder",
                     enabled = false,
@@ -104,7 +127,6 @@ fun SetupScreen(
                 MvpCombo(
                     selected = profile,
                     items = listOf(
-                        "Mobile — 64 MiB, 3 iterations",
                         "Balanced — 256 MiB, 3 iterations",
                         "High security — 512 MiB, 4 iterations",
                     ),
@@ -122,6 +144,16 @@ fun SetupScreen(
                 }
                 MvpButton("Create vault", onClick = { create() }, primary = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
                 MvpButton("Open an existing vault", onClick = onOpenExisting, enabled = !busy, modifier = Modifier.fillMaxWidth())
+                if (showFolderPicker) {
+                    FolderPickerDialog(
+                        onDismiss = { showFolderPicker = false },
+                        onPicked = { picked ->
+                            location = picked
+                            VaultLocation.save(context, picked)
+                            showFolderPicker = false
+                        },
+                    )
+                }
             }
         }
     }

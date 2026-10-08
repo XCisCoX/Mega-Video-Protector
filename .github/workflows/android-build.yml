@@ -3,14 +3,35 @@ name: Android Build
 on:
   push:
     branches: [main]
+    tags: ["v*"]
   pull_request:
     branches: [main]
   workflow_dispatch:
+
+# The native dependency build (openssl/libsodium/sqlcipher/ffmpeg) is the long
+# part. A newer push supersedes an in-flight run, so cancel the old one instead
+# of paying for it.
+concurrency:
+  group: android-build-${{ github.ref }}
+  cancel-in-progress: true
+
+permissions:
+  contents: read
 
 jobs:
   android:
     name: Android arm64-v8a APK
     runs-on: ubuntu-latest
+    timeout-minutes: 120
+    env:
+      # Pinned to the revision app/build.gradle.kts declares as its ndkVersion.
+      # It is published in the stable SDK channel (channel-0), so a plain
+      # `sdkmanager --install` finds it.
+      NDK_VERSION: "30.0.14904198"
+      # Runner image default; also what scripts/android/build-android-core.sh
+      # searches when ANDROID_NDK_ROOT is unset.
+      ANDROID_SDK_ROOT: /usr/local/lib/android/sdk
+      ANDROID_HOME: /usr/local/lib/android/sdk
     steps:
       - name: Checkout
         uses: actions/checkout@v4
@@ -24,31 +45,94 @@ jobs:
       - name: Android SDK (cmdline-tools on PATH)
         uses: android-actions/setup-android@v3
 
+      - name: Cache Android SDK packages
+        uses: actions/cache@v4
+        with:
+          path: ${{ env.ANDROID_SDK_ROOT }}
+          key: android-sdk-${{ runner.os }}-${{ env.NDK_VERSION }}
+          restore-keys: android-sdk-${{ runner.os }}-
+
       - name: Install SDK packages + host tools
         run: |
+          set -euo pipefail
           yes | sdkmanager --licenses >/dev/null 2>&1 || true
           sdkmanager --install \
             "platform-tools" \
             "platforms;android-36" \
             "build-tools;35.0.0" \
-            "ndk;30.0.14904198" \
+            "ndk;${NDK_VERSION}" \
             "cmake;3.22.1" >/dev/null
           sudo apt-get update -qq
-          # qemu-user lets the core script's aarch64 test loop actually run
-          # (the script auto-installs it, but needs root for apt).
-          sudo apt-get install -y -qq make tcl qemu-user
+          # make/ninja drive the core's CMake build, qemu-user runs its aarch64
+          # test suites (the script skips them without it), tcl is optional.
+          sudo apt-get install -y -qq make ninja-build tcl qemu-user
+
+      - name: Cache cross-built deps + core
+        uses: actions/cache@v4
+        with:
+          path: out/android-arm64
+          key: core-arm64-${{ runner.os }}-${{ hashFiles('scripts/android/build-android-core.sh', 'core/**', 'CMakeLists.txt') }}
+          restore-keys: core-arm64-${{ runner.os }}-
 
       - name: Build Android core (deps + static libs + aarch64 tests)
-        run: |
-          export ANDROID_NDK_ROOT="$ANDROID_SDK_ROOT/ndk/30.0.14904198"
-          bash scripts/android/build-android-core.sh
+        env:
+          ANDROID_NDK_ROOT: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: bash scripts/android/build-android-core.sh
+
+      - name: Cache Gradle
+        uses: actions/cache@v4
+        with:
+          path: |
+            ~/.gradle/caches
+            ~/.gradle/wrapper
+          key: gradle-${{ runner.os }}-${{ hashFiles('android/**/*.gradle*', 'android/gradle/wrapper/gradle-wrapper.properties') }}
+          restore-keys: gradle-${{ runner.os }}-
 
       - name: Build debug APK
         env:
-          MVP_ANDROID_PREFIX: "${{ github.workspace }}/out/android-arm64/prefix"
+          MVP_ANDROID_PREFIX: ${{ github.workspace }}/out/android-arm64/prefix
         run: |
+          set -euo pipefail
           cd android
-          ./gradlew --no-daemon assembleDebug
+          chmod +x gradlew
+          # The wrapper distribution is pinned to the mirror reachable from the
+          # developer's network. If that mirror is ever unavailable, fall back to
+          # the official distribution before failing the job.
+          if ! ./gradlew --no-daemon assembleDebug; then
+            echo "::warning::gradlew failed; retrying with the official Gradle distribution"
+            # Written with printf rather than sed: the backslash that escapes the
+            # colon in a .properties value must survive shell + YAML layers.
+            printf 'distributionUrl=https\\://services.gradle.org/distributions/gradle-8.14.3-bin.zip\n' \
+              > gradle/wrapper/gradle-wrapper.properties
+            ./gradlew --no-daemon assembleDebug
+          fi
+
+      - name: Verify the APK carries a working native core
+        env:
+          NDK_PATH: ${{ env.ANDROID_SDK_ROOT }}/ndk/${{ env.NDK_VERSION }}
+        run: |
+          set -euo pipefail
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          test -f "$APK"
+          unzip -l "$APK" | grep -q 'lib/arm64-v8a/libmvpcore.so'
+          unzip -l "$APK" | grep -q 'classes.dex'
+          # A broken native link still produces an APK — a dead one. Assert the
+          # JNI entry points the Kotlin side declares are really exported.
+          NM="$NDK_PATH/toolchains/llvm/prebuilt/linux-x86_64/bin/llvm-nm"
+          rm -rf /tmp/apkcheck && mkdir -p /tmp/apkcheck
+          unzip -o -q "$APK" 'lib/arm64-v8a/libmvpcore.so' -d /tmp/apkcheck
+          SO=/tmp/apkcheck/lib/arm64-v8a/libmvpcore.so
+          "$NM" -D --defined-only "$SO" > /tmp/apkcheck/symbols.txt
+          for sym in \
+            nativeVaultExists nativeCreateVault nativeOpenVault nativeLock \
+            nativeListVideos nativeImportFile nativeRemoveVideo nativeThumbnail \
+            nativeMediaInfo nativeRestoreVideo nativeListTags nativeAddTag \
+            nativeDecodeFrame nativeCreateTag nativeVideoSize nativeReadRange; do
+            grep -q "_${sym}" /tmp/apkcheck/symbols.txt \
+              || { echo "MISSING JNI SYMBOL: $sym"; exit 1; }
+          done
+          echo "libmvpcore.so: $(grep -c . /tmp/apkcheck/symbols.txt) dynamic symbols, all JNI entry points present"
+          ls -la "$APK"
 
       - name: Upload APK
         uses: actions/upload-artifact@v4
@@ -56,9 +140,18 @@ jobs:
           name: MegaVideoProtect-native-debug
           path: android/app/build/outputs/apk/debug/app-debug.apk
           if-no-files-found: error
+          retention-days: 30
 
-      - name: Summarize
+      - name: Summary
+        if: always()
         run: |
-          ls -la android/app/build/outputs/apk/debug/app-debug.apk
-          unzip -l android/app/build/outputs/apk/debug/app-debug.apk | \
-            grep -E "libmvpcore|classes.dex" || true
+          APK=android/app/build/outputs/apk/debug/app-debug.apk
+          {
+            echo "### Android arm64-v8a"
+            echo
+            if [ -f "$APK" ]; then
+              echo "APK: \`$APK\` ($(stat -c%s "$APK") bytes)"
+            else
+              echo "No APK was produced."
+            fi
+          } >> "$GITHUB_STEP_SUMMARY"

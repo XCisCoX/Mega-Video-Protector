@@ -98,7 +98,17 @@ std::int64_t seek_packet(void* opaque, const std::int64_t offset, const int when
 }
 
 struct AvIoContextDeleter {
-    void operator()(AVIOContext* context) const { avio_context_free(&context); }
+    void operator()(AVIOContext* context) const {
+        if (context == nullptr) return;
+        // avio_context_free() releases the AVIOContext but not the buffer we
+        // passed to avio_alloc_context(): that must be freed with av_free(). It
+        // may also have been swapped for a larger one by libavformat, which is
+        // why the current pointer is freed rather than ours.
+        if (context->buffer != nullptr) {
+            av_freep(&context->buffer);
+        }
+        avio_context_free(&context);
+    }
 };
 using AvIoPtr = std::unique_ptr<AVIOContext, AvIoContextDeleter>;
 
@@ -138,7 +148,17 @@ struct FormatHandle {
 
 // Opens the format context with a custom AVIO layered over the reader. The
 // returned handle is null when the input is not a recognizable container.
-Result<FormatHandle> open_format(PackageReader& reader) {
+// `name_hint` is a filename given to FFmpeg purely so its extension-keyed
+// demuxers (image2 and friends) can identify a bare image: the vault streams
+// through a custom AVIO with no filename, so a PNG/WebP/BMP would otherwise be
+// undemuxable (JPEG happened to work only because its `mjpeg` demuxer probes
+// content).
+Result<FormatHandle> try_open_format(PackageReader& reader, const char* name_hint) {
+    // Each attempt consumes the stream; start from the beginning every time.
+    auto rewound = reader.seek(0U);
+    if (!rewound) {
+        return rewound.error();
+    }
     auto* io_buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
     if (io_buffer == nullptr) {
         return VaultError{VaultErrorCode::CryptoFailure,
@@ -168,15 +188,44 @@ Result<FormatHandle> open_format(PackageReader& reader) {
     raw_format->pb = handle.io.get();
     raw_format->flags |= AVFMT_FLAG_CUSTOM_IO;
 
-    const int status = avformat_open_input(&raw_format, nullptr, nullptr, nullptr);
+    const int status = avformat_open_input(&raw_format, name_hint, nullptr, nullptr);
     if (status < 0) {
-        if (raw_format != nullptr) {
-            avformat_free_context(raw_format);
-        }
+        // avformat_open_input() frees the context itself when it fails and
+        // guarantees *ps == nullptr; freeing that pointer a second time (or
+        // freeing a stale one) is a double free. It is exactly what crashed
+        // with SIGSEGV inside avformat_free_context the first time the image
+        // viewer decoded a photo, because every image attempt after the failed
+        // container probe takes this path.
+        raw_format = nullptr;
         return media_error("open media container", status);
     }
     handle.format.reset(raw_format);
     return handle;
+}
+
+// First try the input as a container (FFmpeg probes those by content). If that
+// fails, retry with image filename hints so the extension-keyed image demuxers
+// can take over — this is what makes imported photos (not just videos) work.
+Result<FormatHandle> open_format(PackageReader& reader) {
+    auto container = try_open_format(reader, nullptr);
+    if (container) {
+        return container;
+    }
+    // Hold on to the first failure's message, but do not hand that Result back
+    // to the caller at the end: it carries a failed attempt's FormatHandle, and
+    // the image attempts below supersede it.
+    const VaultError first_error = container.error();
+    static const char* const kImageHints[] = {
+        "image.png", "image.jpg", "image.webp", "image.gif",
+        "image.bmp", "image.tiff", "image.avif", "image.heic",
+    };
+    for (const char* hint : kImageHints) {
+        auto as_image = try_open_format(reader, hint);
+        if (as_image) {
+            return as_image;
+        }
+    }
+    return first_error;
 }
 
 AVStream* first_video_stream(AVFormatContext* format) {
