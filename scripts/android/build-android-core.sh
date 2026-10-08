@@ -196,7 +196,7 @@ if [ ! -f "$PREFIX/lib/libsodium.a" ]; then
     echo "== building libsodium (autotools, static) =="
     ./configure --host=aarch64-linux-android \
         --prefix="$PREFIX" --enable-static --disable-shared \
-        CC="$CC" >/dev/null
+        CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" >/dev/null
     "$MAKE" -j"$JOBS" >/dev/null
     "$MAKE" install >/dev/null
     popd >/dev/null
@@ -228,19 +228,24 @@ if [ ! -f "$PREFIX/lib/libsqlcipher.a" ]; then
         --prefix="$PREFIX" --enable-static --disable-shared \
         --disable-tcl --disable-tests \
         --with-crypto-lib=openssl \
-        CC="$CC" \
+        CC="$CC" AR="$AR" RANLIB="$RANLIB" NM="$NM" STRIP="$STRIP" \
         CFLAGS="-I$PREFIX/include -O2 -fPIC -DSQLITE_HAS_CODEC" \
         LDFLAGS="-L$PREFIX/lib" >/dev/null
     # Generate the parser/opcode headers SERIALLY first: parallel make races
     # them against the amalgamation compile (sqlite3.c does not declare
     # opcodes.h/keywordhash.h as prerequisites), and stale 0-byte outputs
     # from earlier failed runs would otherwise be picked up.
+    # sqlcipher's hand-written Makefile stores the source root as an absolute
+    # MSYS path ($(TOP) = /c/...) and regenerates Makefile from $(TOP)/Makefile.in,
+    # which a Windows-native make cannot stat; point TOP at the drive-letter
+    # path instead.
+    MAKE_TOP="TOP=$(win_path "$SRC/sqlcipher")"
     rm -f opcodes.h opcodes.c keywordhash.h
-    "$MAKE" -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
+    "$MAKE" "$MAKE_TOP" -j1 opcodes.h opcodes.c keywordhash.h parse.h sqlite3.h >/dev/null
     # Build ONLY the static library, not the `sqlcipher` shell binary: the
     # shell links the codec against Android's logcat logging and would need
     # -llog plus a working tclsh at runtime, and nothing uses it here.
-    "$MAKE" -j"$JOBS" libsqlcipher.la >/dev/null
+    "$MAKE" "$MAKE_TOP" -j"$JOBS" libsqlcipher.la >/dev/null
     cp .libs/libsqlcipher.a "$PREFIX/lib/"
     cp sqlite3.h "$PREFIX/include/"
     # The core includes <sqlcipher/sqlite3.h> — install the public headers
@@ -261,6 +266,12 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
     # them — the previous mjpeg+matroska-only build could not even probe an
     # MP4/H.264 file, which left the gallery metadata empty and every thumbnail
     # and frame decode failing. Encoders stay minimal (MJPEG for thumbnails).
+    # --disable-asm: FFmpeg's hand-written aarch64 assembly is assembled without
+    # -fPIC here, so its objects carry R_AARCH64_ADR_PREL_PG_HI21 relocations
+    # that ld.lld refuses to link into libmvpcore.so ("recompile with -fPIC").
+    # C-only FFmpeg is plenty for what the app uses it for (probing container
+    # metadata, decoding one frame for thumbnails, MJPEG-encoding it); actual
+    # playback is hardware-decoded by MediaCodec.
     ./configure \
         --cc="$CC" --cxx="$CXX" --ar="$AR" --nm="$NM" --ranlib="$RANLIB" --strip="$STRIP" \
         --target-os=android --arch=aarch64 --enable-cross-compile --enable-pic \
@@ -273,6 +284,7 @@ if [ ! -f "$PREFIX/lib/libavformat.a" ]; then
         --enable-parser=mjpeg,h264,hevc,mpeg4video,mpegvideo,vp8,vp9,av1,aac,flac,opus,vorbis \
         --enable-protocol=file \
         --enable-small --disable-zlib --disable-bzlib --disable-lzma --disable-iconv \
+        --disable-asm \
         --prefix="$PREFIX" >/dev/null
     "$MAKE" -j"$JOBS" >/dev/null
     "$MAKE" install >/dev/null

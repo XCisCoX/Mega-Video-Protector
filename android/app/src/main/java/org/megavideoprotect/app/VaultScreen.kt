@@ -117,9 +117,13 @@ fun VaultScreen(
     Column(Modifier.fillMaxSize().background(Mvp.window)) {
         // Toolbar (Qt: viewModeCombo, tagFilterCombo, searchEdit, Import video…,
         // Import folder…, Settings…, Lock).
+        // A phone cannot fit the desktop toolbar across one screen width, so
+        // scroll it horizontally instead of squeezing the buttons (Lock clipped
+        // to "L c" on a 1220 px screen).
         Row(
             Modifier
                 .fillMaxWidth()
+                .horizontalScroll(rememberScrollState())
                 .background(Mvp.headerBg)
                 .padding(horizontal = 12.dp, vertical = 8.dp),
             horizontalArrangement = Arrangement.spacedBy(8.dp),
@@ -141,7 +145,9 @@ fun VaultScreen(
                 value = search,
                 onValueChange = { search = it },
                 placeholder = "Search",
-                modifier = Modifier.weight(1f),
+                // Fixed width, not weight(1f): a weighted child inside a
+                // horizontally scrollable Row is not allowed.
+                modifier = Modifier.width(150.dp),
             )
             MvpButton("Import", onClick = { importLauncher.launch(arrayOf("video/*", "application/octet-stream")) }, primary = true)
             MvpButton("Settings…", onClick = { showSettings = true })
@@ -241,7 +247,11 @@ private suspend fun importBatch(
 
     uris.forEachIndexed { index, uri ->
         val name = queryName(context.contentResolver, uri) ?: "import_$index.mp4"
-        val tmp = File(context.cacheDir, "import_$index-$name")
+        // Stage each file in its own directory but keep the *original* file
+        // name: the core records the gallery name from the path it imports, so
+        // prefixing the temp file would rename the user's video in the vault.
+        val staging = File(context.cacheDir, "import_$index").apply { mkdirs() }
+        val tmp = File(staging, name)
         val result = try {
             context.contentResolver.openInputStream(uri)?.use { input ->
                 tmp.outputStream().use { output ->
@@ -263,6 +273,7 @@ private suspend fun importBatch(
             CoreBridge.Result(false, "Import failed: $name", e.message ?: "")
         } finally {
             tmp.delete()
+            staging.delete()
         }
         results.add(result)
     }

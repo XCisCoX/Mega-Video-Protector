@@ -3,12 +3,17 @@ package org.megavideoprotect.app
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
+import androidx.compose.foundation.layout.imePadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.material3.CircularProgressIndicator
+import androidx.compose.material3.Text
 import androidx.compose.runtime.Composable
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
@@ -19,6 +24,7 @@ import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.unit.dp
+import androidx.compose.ui.unit.sp
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
@@ -33,7 +39,7 @@ fun SetupScreen(
 ) {
     var password by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    var profile by remember { mutableStateOf("Balanced — 256 MiB, 3 iterations") }
+    var profile by remember { mutableStateOf("Mobile — 64 MiB, 3 iterations") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
     val scope = rememberCoroutineScope()
@@ -49,7 +55,15 @@ fun SetupScreen(
         }
         error = null
         busy = true
-        val memKib = if (profile.startsWith("High")) 512 * 1024 else 256 * 1024
+        // A phone cannot afford the desktop profile: Argon2id at 256 MiB x 3
+        // took ~45 s to unlock on a Redmi Note 13 Pro, during which the UI looks
+        // frozen. The mobile profile keeps the same iteration count at 64 MiB
+        // (still far above OWASP's Argon2id floor) and unlocks in a few seconds.
+        val memKib = when {
+            profile.startsWith("High") -> 512 * 1024
+            profile.startsWith("Mobile") -> 64 * 1024
+            else -> 256 * 1024
+        }
         val iters = if (profile.startsWith("High")) 4 else 3
         scope.launch {
             val res = withContext(Dispatchers.Default) {
@@ -65,6 +79,9 @@ fun SetupScreen(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
+                // Edge-to-edge activity: pad by the IME inset so the soft
+                // keyboard does not cover the Create vault button.
+                .imePadding()
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,
             verticalArrangement = Arrangement.Center,
@@ -87,12 +104,22 @@ fun SetupScreen(
                 MvpCombo(
                     selected = profile,
                     items = listOf(
+                        "Mobile — 64 MiB, 3 iterations",
                         "Balanced — 256 MiB, 3 iterations",
                         "High security — 512 MiB, 4 iterations",
                     ),
                     onSelect = { profile = it },
                 )
                 MvpError(error)
+                if (busy) {
+                    Row(
+                        verticalAlignment = Alignment.CenterVertically,
+                        horizontalArrangement = Arrangement.spacedBy(10.dp),
+                    ) {
+                        CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
+                        Text("Creating the vault — deriving the key…", color = Mvp.description, fontSize = 12.sp)
+                    }
+                }
                 MvpButton("Create vault", onClick = { create() }, primary = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
                 MvpButton("Open an existing vault", onClick = onOpenExisting, enabled = !busy, modifier = Modifier.fillMaxWidth())
             }

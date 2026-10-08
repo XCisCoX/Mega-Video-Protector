@@ -79,6 +79,45 @@ build script fakes the missing pieces instead:
 On GitHub Actions (unrestricted network) none of this is needed — the
 workflow installs the real SDK packages with `sdkmanager`.
 
+## Building on a Windows host (no Docker, restricted network)
+
+`scripts/android/build-android-core.sh` also runs on a Windows host with an NDK
+installed (`ANDROID_NDK_ROOT=/c/path/to/ndk`); it detects the host toolchain
+directory (`windows-x86_64`), resolves `make` as `mingw32-make`, and drives
+clang directly with an explicit `--target=` instead of the NDK's launcher
+scripts (POSIX wrappers on Linux, `.cmd` on Windows). Points that matter:
+
+* **Paths must not contain spaces.** OpenSSL's perl `Configure` and FFmpeg's
+  makefiles break on them (perl `@INC` splitting, make word splitting), so build
+  from a space-free copy of the tree — e.g. copy the sources to `C:/mvpbuild`
+  and run the build there. A directory junction is *not* enough: `getcwd()`
+  resolves back to the real (spaced) path.
+* **Drive-letter vs POSIX paths.** Native tools (clang, cmake, perl) need
+  `C:/...`; MSYS tools (`tar`) and the shell's own `PATH` lookups need
+  `/c/...`. The script's `win_path` / `posix_path` helpers convert, and
+  `ANDROID_NDK_ROOT` is handed to OpenSSL's `Configure` in POSIX form because
+  that script matches `which("clang")` against `$ndk/.../prebuilt/`.
+* **Perl.** OpenSSL's `Configure` must run under the MSYS/Cygwin-style perl
+  (which splits `PATH` on `:` and returns POSIX paths). Git for Windows ships a
+  cut-down perl missing `Locale::Maketext::Simple`, `ExtUtils::MakeMaker` and
+  `Pod::Usage`/`Pod::Text`; copy those pure-Perl modules out of a Strawberry
+  Perl install into a directory and point `PERL5LIB` at it. A native Windows
+  perl cannot be used at all here — it splits `PATH` on `:` and so never finds
+  a drive-letter path.
+* **curl.** Git for Windows' curl aborts every HTTPS transfer with
+  `CRYPT_E_REVOCATION_OFFLINE` when the CRL server is unreachable; the script
+  adds `--ssl-no-revoke` on Windows hosts.
+* **Gradle wrapper.** If the wrapper's own download fails (transient Java TLS
+  error), fetch the distribution zip with curl into
+  `~/.gradle/wrapper/dists/gradle-<version>-bin/<hash>/gradle-<version>-bin.zip`,
+  delete any stale `.part`/`.lck`, and re-run `./gradlew`.
+
+Mirrors that work from Iran (the paths this build was validated against):
+`mirrors.cloud.tencent.com/AndroidSDK` (SDK + NDK + build-tools), Adoptium via
+`api.adoptium.net` (JDK), `mirrors.huaweicloud.com/gradle` (Gradle),
+`maven.aliyun.com/repository/{google,central,gradle-plugin}` (Maven), and
+`codeload.github.com` (dependency sources). `dl.google.com` is filtered.
+
 ## Project layout (Android)
 
 ```text

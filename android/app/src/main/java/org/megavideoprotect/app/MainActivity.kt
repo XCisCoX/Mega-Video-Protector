@@ -20,10 +20,12 @@ class MainActivity : ComponentActivity() {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        // The vault lives in the app-private sandbox (filesDir), exactly like
-        // the desktop app's QStandardPaths::AppDataLocation fallback on
-        // Android. No storage permission needed.
-        val vaultRoot = filesDir.absolutePath
+        // The vault location is user-selectable (see VaultLocation); fall back
+        // to the private sandbox when nothing has been chosen yet. No storage
+        // permission is needed for either root.
+        val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
+        val locationOptions = runCatching { VaultLocation.options(this) }
+            .getOrDefault(listOf(filesDir.absolutePath))
 
         // Deterministic: no network / IO in composition — the vault check runs
         // once here, before the first frame.
@@ -53,11 +55,13 @@ class MainActivity : ComponentActivity() {
                     when (val current = screen) {
                         is Screen.Setup -> SetupScreen(
                             vaultLocation = vaultRoot,
+                            locationOptions = locationOptions,
                             onCreated = { screen = Screen.Vault },
                             onOpenExisting = { screen = Screen.Login },
                         )
                         is Screen.Login -> LoginScreen(
                             vaultLocation = vaultRoot,
+                            locationOptions = locationOptions,
                             onUnlocked = { screen = Screen.Vault },
                             onBack = { screen = Screen.Setup },
                         )

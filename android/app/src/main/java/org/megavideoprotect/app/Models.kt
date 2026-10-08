@@ -32,7 +32,8 @@ data class VideoEntry(
     }
     val importedText: String get() {
         if (importedAt <= 0) return "—"
-        val d = java.util.Date(importedAt)
+        // The vault stores imported_at as seconds since the epoch; Date wants ms.
+        val d = java.util.Date(importedAt * 1000L)
         val fmt = java.text.SimpleDateFormat("yyyy-MM-dd HH:mm", java.util.Locale.US)
         return fmt.format(d)
     }
