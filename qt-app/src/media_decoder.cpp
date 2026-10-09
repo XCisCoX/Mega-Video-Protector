@@ -9,6 +9,7 @@ extern "C" {
 #include <libavutil/error.h>
 #include <libavutil/frame.h>
 #include <libavutil/opt.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
@@ -35,6 +36,45 @@ namespace {
 constexpr std::size_t kAvioBufferSize = 128U * 1024U;
 constexpr std::int64_t kMaxAudioSamples = 1U << 20; // ~8.7 min of s16le stereo 48k
 constexpr std::uint64_t kDefaultStreamCacheBytes = 32U << 20; // 32 MiB
+
+// Same dark surface the gallery thumbnails are composited onto, so a
+// transparent PNG looks the same in the viewer as it does in the gallery.
+constexpr unsigned char kImageBackgroundR = 16;
+constexpr unsigned char kImageBackgroundG = 21;
+constexpr unsigned char kImageBackgroundB = 29;
+
+bool format_has_alpha_or_palette(const AVPixelFormat format) {
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(format);
+    if (desc == nullptr) {
+        return false;
+    }
+    return (desc->flags & (AV_PIX_FMT_FLAG_ALPHA | AV_PIX_FMT_FLAG_PAL)) != 0;
+}
+
+void composite_bgra(
+    unsigned char* pixels,
+    const int linesize,
+    const int width,
+    const int height) {
+    for (int y = 0; y < height; ++y) {
+        auto* row = pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(linesize);
+        for (int x = 0; x < width; ++x) {
+            unsigned char* pixel = row + static_cast<std::size_t>(x) * 4U;
+            const unsigned int alpha = pixel[3];
+            if (alpha == 255U) {
+                continue;
+            }
+            const unsigned int inverse = 255U - alpha;
+            pixel[0] = static_cast<unsigned char>(
+                (pixel[0] * alpha + kImageBackgroundB * inverse) / 255U);
+            pixel[1] = static_cast<unsigned char>(
+                (pixel[1] * alpha + kImageBackgroundG * inverse) / 255U);
+            pixel[2] = static_cast<unsigned char>(
+                (pixel[2] * alpha + kImageBackgroundR * inverse) / 255U);
+            pixel[3] = 255;
+        }
+    }
+}
 
 QString av_error_message(const char* operation, const int status) {
     char buffer[AV_ERROR_MAX_STRING_SIZE]{};
@@ -335,57 +375,74 @@ public:
             }
         }
 
-        auto* io_buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
-        if (io_buffer == nullptr) {
-            if (error != nullptr) {
-                *error = QStringLiteral("Out of memory opening the video.");
-            }
-            return false;
-        }
         handle_ = std::make_unique<FormatHandle>(
             FormatHandle{VaultSource(vault, video_id, cache_budget_), nullptr, nullptr});
         handle_->source.set_plaintext_size(plaintext_size);
 
-        AVIOContext* raw_io = avio_alloc_context(
-            io_buffer, static_cast<int>(kAvioBufferSize), 0, &handle_->source,
-            source_read_packet, nullptr, source_seek);
-        if (raw_io == nullptr) {
-            av_free(io_buffer);
-            if (error != nullptr) {
-                *error = QStringLiteral("Unable to allocate the FFmpeg IO context.");
+        // Each attempt gets a fresh AVIO. A failed avformat_open_input() has
+        // already consumed the previous buffer, and it frees the format
+        // context itself (the pointer comes back null — freeing it again is
+        // the double-free that crashed image opens).
+        auto open_input = [&](const char* name_hint) -> int {
+            handle_->format.reset();
+            handle_->io.reset();
+            handle_->source.seek(0, SEEK_SET);
+            auto* buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
+            if (buffer == nullptr) {
+                return AVERROR(ENOMEM);
             }
-            return false;
-        }
-        handle_->io.reset(raw_io);
-        // avio_alloc_context zeroes `seekable`; without this flag FFmpeg
-        // refuses every avio_seek (AVERROR(ENOSYS)), which made both the
-        // player's seek_to() and the thumbnail seek silently fail (falling
-        // back to the first frame). VaultSource::seek is functional — the
-        // stream must advertise that.
-        raw_io->seekable = AVIO_SEEKABLE_NORMAL;
+            AVIOContext* raw_io = avio_alloc_context(
+                buffer, static_cast<int>(kAvioBufferSize), 0, &handle_->source,
+                source_read_packet, nullptr, source_seek);
+            if (raw_io == nullptr) {
+                av_free(buffer);
+                return AVERROR(ENOMEM);
+            }
+            handle_->io.reset(raw_io);
+            // avio_alloc_context zeroes `seekable`; without this flag FFmpeg
+            // refuses every avio_seek (AVERROR(ENOSYS)), which made both the
+            // player's seek_to() and the thumbnail seek silently fail (falling
+            // back to the first frame). VaultSource::seek is functional — the
+            // stream must advertise that.
+            raw_io->seekable = AVIO_SEEKABLE_NORMAL;
 
-        AVFormatContext* raw_format = avformat_alloc_context();
-        if (raw_format == nullptr) {
-            if (error != nullptr) {
-                *error = QStringLiteral("Unable to allocate the FFmpeg format context.");
+            AVFormatContext* raw_format = avformat_alloc_context();
+            if (raw_format == nullptr) {
+                return AVERROR(ENOMEM);
             }
-            return false;
-        }
-        raw_format->pb = handle_->io.get();
-        raw_format->flags |= AVFMT_FLAG_CUSTOM_IO;
+            raw_format->pb = handle_->io.get();
+            raw_format->flags |= AVFMT_FLAG_CUSTOM_IO;
+            const int open_status = avformat_open_input(
+                &raw_format, name_hint, nullptr, nullptr);
+            if (open_status < 0) {
+                return open_status;
+            }
+            handle_->format.reset(raw_format);
+            return 0;
+        };
 
-        int status = avformat_open_input(&raw_format, nullptr, nullptr, nullptr);
-        if (status < 0) {
-            if (raw_format != nullptr) {
-                avformat_free_context(raw_format);
+        // Containers probe by content. Bare stills often do not: image2 is
+        // keyed by filename extension, and this AVIO has no path. The same
+        // hints the thumbnail path uses let a PNG/WebP/BMP open in the viewer.
+        static const char* const kImageHints[] = {
+            nullptr, "image.png", "image.jpg", "image.webp", "image.gif",
+            "image.bmp", "image.tiff",
+        };
+        int status = AVERROR_INVALIDDATA;
+        for (const char* hint : kImageHints) {
+            status = open_input(hint);
+            if (status >= 0) {
+                break;
             }
+        }
+        if (status < 0 || handle_->format == nullptr) {
             handle_.reset();
             if (error != nullptr) {
                 *error = av_error_message("open media container", status);
             }
             return false;
         }
-        handle_->format.reset(raw_format);
+        AVFormatContext* raw_format = handle_->format.get();
 
         status = avformat_find_stream_info(raw_format, nullptr);
         if (status < 0) {
@@ -489,6 +546,9 @@ public:
         video_height_ = 0;
         audio_sample_rate_ = 0;
         audio_channels_ = 0;
+        scaler_src_fmt_ = AV_PIX_FMT_NONE;
+        scaler_src_w_ = 0;
+        scaler_src_h_ = 0;
     }
 
     bool is_open() const { return handle_ != nullptr && handle_->format != nullptr; }
@@ -617,11 +677,31 @@ private:
     }
 
     QImage convert_frame(const AVFrame* source) {
+        const auto src_fmt = static_cast<AVPixelFormat>(source->format);
+        // PNG (and other stills) often report AV_PIX_FMT_NONE on the codec
+        // until the first frame is decoded, and the frame format can differ
+        // from the codec's (palette vs RGBA). Rebuild from the frame itself.
+        if (!scaler_ || src_fmt != scaler_src_fmt_
+            || source->width != scaler_src_w_ || source->height != scaler_src_h_) {
+            scaler_src_fmt_ = src_fmt;
+            scaler_src_w_ = source->width;
+            scaler_src_h_ = source->height;
+            if (video_width_ <= 0) {
+                video_width_ = source->width;
+            }
+            if (video_height_ <= 0) {
+                video_height_ = source->height;
+            }
+            rebuild_scaler();
+        }
         if (!scaler_) {
             return QImage();
         }
         const int output_width = display_width_ > 0 ? display_width_ : video_width_;
         const int output_height = display_height_ > 0 ? display_height_ : video_height_;
+        if (output_width <= 0 || output_height <= 0) {
+            return QImage();
+        }
         AvFramePtr rgb(av_frame_alloc());
         rgb->format = AV_PIX_FMT_BGRA;
         rgb->width = output_width;
@@ -631,6 +711,11 @@ private:
         }
         sws_scale(scaler_.get(), source->data, source->linesize, 0, source->height,
             rgb->data, rgb->linesize);
+        if (format_has_alpha_or_palette(src_fmt)) {
+            // Format_RGB32 is painted with the alpha byte on Windows, so a
+            // transparent PNG would show as holes instead of the picture.
+            composite_bgra(rgb->data[0], rgb->linesize[0], output_width, output_height);
+        }
         QImage image(
             rgb->data[0], output_width, output_height,
             rgb->linesize[0], QImage::Format_RGB32);
@@ -652,15 +737,40 @@ public:
     }
 
     void rebuild_scaler() {
-        if (!video_codec_) {
-            return;
-        }
+        const int src_w = scaler_src_w_ > 0
+            ? scaler_src_w_
+            : (video_codec_ ? video_codec_->width : 0);
+        const int src_h = scaler_src_h_ > 0
+            ? scaler_src_h_
+            : (video_codec_ ? video_codec_->height : 0);
+        const AVPixelFormat src_fmt = scaler_src_fmt_ != AV_PIX_FMT_NONE
+            ? scaler_src_fmt_
+            : (video_codec_ ? video_codec_->pix_fmt : AV_PIX_FMT_NONE);
         const int output_width = display_width_ > 0 ? display_width_ : video_width_;
         const int output_height = display_height_ > 0 ? display_height_ : video_height_;
+        if (src_w <= 0 || src_h <= 0 || output_width <= 0 || output_height <= 0
+            || src_fmt == AV_PIX_FMT_NONE) {
+            scaler_.reset();
+            return;
+        }
         scaler_.reset(sws_getContext(
-            video_codec_->width, video_codec_->height, video_codec_->pix_fmt,
+            src_w, src_h, src_fmt,
             output_width, output_height, AV_PIX_FMT_BGRA,
             SWS_BILINEAR, nullptr, nullptr, nullptr));
+        if (scaler_) {
+            const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(src_fmt);
+            const bool yuv = desc != nullptr
+                && (desc->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL)) == 0
+                && desc->nb_components >= 3;
+            // PNG/gray/palette is full range. Leaving swscale at MPEG limited
+            // range dulls the picture the same way the old thumbnails did.
+            if (!yuv) {
+                const int* coefficients = sws_getCoefficients(SWS_CS_ITU601);
+                sws_setColorspaceDetails(
+                    scaler_.get(), coefficients, 1, coefficients, 1,
+                    0, 1 << 16, 1 << 16);
+            }
+        }
     }
 
     void append_audio(const AVFrame* decoded) {
@@ -708,6 +818,9 @@ public:
     std::uint64_t cache_budget_{kDefaultStreamCacheBytes};
     int display_width_{0};
     int display_height_{0};
+    AVPixelFormat scaler_src_fmt_{AV_PIX_FMT_NONE};
+    int scaler_src_w_{0};
+    int scaler_src_h_{0};
 };
 
 MediaDecoder::MediaDecoder() : impl_(std::make_unique<Impl>()) {}

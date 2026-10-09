@@ -632,6 +632,59 @@ int main() {
 
     std::printf("MP4 interframe seek checks succeeded.\n");
 
+    // PNG is a single-frame image with no filename on the custom AVIO. The
+    // viewer must still open it (image2 is extension-keyed) and return an
+    // opaque frame — a transparent PNG used to decode as a hole on Windows.
+    {
+        static const unsigned char kTinyPng[] = {
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+            0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x4F, 0x25, 0xC4, 0xD6, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
+            0x41, 0x54, 0x78, 0x9C, 0x63, 0xFC, 0xCF, 0xC0, 0x50, 0x0F, 0x00, 0x04,
+            0x85, 0x01, 0x80, 0x5B, 0xF7, 0x9E, 0x31, 0x00, 0x00, 0x00, 0x00, 0x49,
+            0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        };
+        const auto png_path = temp.path() / L"tiny.png";
+        {
+            std::ofstream out(png_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(kTinyPng), sizeof(kTinyPng));
+            if (!out) {
+                return fail("Writing the PNG fixture must succeed.");
+            }
+        }
+        const auto png_root = temp.path() / L"png-vault";
+        auto png_vault = Vault::create(png_root, "png password", testParameters());
+        if (!png_vault) {
+            return fail("Creating a vault for the PNG decode check must succeed.");
+        }
+        const auto png_id = png_vault.value().import_file(png_path);
+        if (!png_id) {
+            return fail("Importing a PNG must succeed.");
+        }
+        auto png_opened = std::make_shared<Vault>(std::move(png_vault.value()));
+        videovault::app::MediaDecoder png_decoder;
+        QString png_error;
+        if (!png_decoder.open(png_opened, png_id.value(), &png_error)) {
+            std::fprintf(stderr, "PNG decoder open failed: %s\n", qPrintable(png_error));
+            return EXIT_FAILURE;
+        }
+        if (png_decoder.video_codec_name() != "png") {
+            return fail("A PNG must open as the png codec.");
+        }
+        videovault::app::DecodedFrame png_frame;
+        if (!png_decoder.decode_next_video_frame(&png_frame)
+            || png_frame.image.isNull()
+            || png_frame.image.width() < 1
+            || png_frame.image.height() < 1
+            || png_frame.image.pixelColor(0, 0).alpha() != 255) {
+            return fail("Decoding a PNG must produce an opaque frame.");
+        }
+        std::printf("PNG decode checks succeeded (%dx%d).\n",
+            png_frame.image.width(), png_frame.image.height());
+    }
+
     // --- Headless PlayerWindow seek test. Runs the REAL player on the
     // offscreen platform: worker thread, tick timer, clock re-anchor, and the
     // slider-release -> doSeek path (simulated by setting the slider value and

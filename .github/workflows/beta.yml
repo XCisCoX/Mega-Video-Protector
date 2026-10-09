@@ -140,7 +140,7 @@ jobs:
           & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
           # Defensive: the crypto stack and the five FFmpeg DLLs must be in the
           # package (throw with a clear message if any are missing).
-          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
+          foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","zlib1.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
             if (-not (Test-Path "$staging\$dll")) { throw "Missing runtime DLL in package: $dll" }
           }
           Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVideoProtect-windows-x64.zip" -Force

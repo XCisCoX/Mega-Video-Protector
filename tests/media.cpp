@@ -443,6 +443,55 @@ int main() {
         under_new.value().lock();
     }
 
+    // A 1x1 semi-transparent PNG: odd dimensions plus alpha. Windows FFmpeg
+    // must be built with zlib or the PNG decoder is missing and this import
+    // produces no thumbnail. The JPEG encoder also rejects odd YUV420 sizes,
+    // so the stored thumbnail is padded to an even size.
+    {
+        static const unsigned char kTinyPng[] = {
+            0x89, 0x50, 0x4E, 0x47, 0x0D, 0x0A, 0x1A, 0x0A, 0x00, 0x00, 0x00, 0x0D,
+            0x49, 0x48, 0x44, 0x52, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00, 0x01,
+            0x08, 0x06, 0x00, 0x00, 0x00, 0x1F, 0x15, 0xC4, 0x89, 0x00, 0x00, 0x00,
+            0x09, 0x70, 0x48, 0x59, 0x73, 0x00, 0x00, 0x00, 0x01, 0x00, 0x00, 0x00,
+            0x01, 0x00, 0x4F, 0x25, 0xC4, 0xD6, 0x00, 0x00, 0x00, 0x0D, 0x49, 0x44,
+            0x41, 0x54, 0x78, 0x9C, 0x63, 0xFC, 0xCF, 0xC0, 0x50, 0x0F, 0x00, 0x04,
+            0x85, 0x01, 0x80, 0x5B, 0xF7, 0x9E, 0x31, 0x00, 0x00, 0x00, 0x00, 0x49,
+            0x45, 0x4E, 0x44, 0xAE, 0x42, 0x60, 0x82,
+        };
+        const auto png_path = temp.path() / L"tiny.png";
+        {
+            std::ofstream out(png_path, std::ios::binary);
+            out.write(reinterpret_cast<const char*>(kTinyPng), sizeof(kTinyPng));
+            if (!out) {
+                return fail("Writing the PNG fixture must succeed.");
+            }
+        }
+        const auto png_root = temp.path() / L"png-vault";
+        auto png_vault = Vault::create(png_root, "png password", testParameters());
+        if (!png_vault) {
+            return fail("Creating a vault for the PNG thumbnail check must succeed.");
+        }
+        const auto png_id = png_vault.value().import_file(png_path);
+        if (!png_id) {
+            return fail("Importing a PNG must succeed.");
+        }
+        const auto thumb = png_vault.value().thumbnail(png_id.value());
+        if (!thumb || thumb.value().bytes.empty()
+            || thumb.value().mime != "image/jpeg"
+            || !isJpeg(thumb.value().bytes)
+            || thumb.value().width < 2U || thumb.value().height < 2U
+            || (thumb.value().width & 1U) != 0U
+            || (thumb.value().height & 1U) != 0U) {
+            std::cerr << "PNG thumbnail missing or not an even-sized JPEG.\n";
+            return fail("Importing a PNG must auto-generate an even-sized JPEG thumbnail.");
+        }
+        const auto info = png_vault.value().media_info(png_id.value());
+        if (!info || info.value().codec_name != "png"
+            || info.value().width != 1U || info.value().height != 1U) {
+            return fail("Probing a PNG must report the png codec and its real size.");
+        }
+    }
+
     std::cout << "Media probing and thumbnail checks succeeded.\n";
     return EXIT_SUCCESS;
 }

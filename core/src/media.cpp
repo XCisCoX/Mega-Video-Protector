@@ -8,6 +8,7 @@ extern "C" {
 #include <libavutil/display.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libavutil/pixdesc.h>
 #include <libavutil/pixfmt.h>
 #include <libswscale/swscale.h>
 }
@@ -351,15 +352,23 @@ Result<AvFramePtr> decode_representative_frame(
         return media_error("open video decoder", status);
     }
 
-    // Keyframe-only decode walk. A "successful" container seek can still
-    // leave the demuxer serving the stream from its start (observed with the
-    // custom AVIO: avformat_seek_file returns 0 yet the first packet is at
-    // 0.000 s even after avformat_flush). Instead of trusting the seek, decode
-    // forward from the current position, skipping non-keyframes, until the
-    // first frame at/after the target appears; the closest frame before the
-    // target is kept as a fallback. Bounded by a packet budget scaled to the
-    // target, so a no-op seek still finishes quickly.
-    codec->skip_frame = AVDISCARD_NONKEY;
+    // Still images (PNG and the other image2 demuxers) are one packet, and
+    // some of those demuxers do not mark it as a keyframe. Discarding
+    // non-keyframes then drops the only frame, so the gallery never gets a
+    // thumbnail. Videos still walk keyframes to reach the 30% mark.
+    if (!single_frame) {
+        codec->skip_frame = AVDISCARD_NONKEY;
+    }
+
+    // Decode walk. A "successful" container seek can still leave the demuxer
+    // serving the stream from its start (observed with the custom AVIO:
+    // avformat_seek_file returns 0 yet the first packet is at 0.000 s even
+    // after avformat_flush). Instead of trusting the seek, decode forward
+    // from the current position until the first frame at/after the target
+    // appears; the closest frame before the target is kept as a fallback.
+    // Bounded by a packet budget scaled to the target, so a no-op seek still
+    // finishes quickly. Videos skip non-keyframes (set above); stills decode
+    // their only frame.
     AvPacketPtr packet(av_packet_alloc());
     if (!packet) {
         return VaultError{VaultErrorCode::CryptoFailure,
@@ -428,7 +437,22 @@ Result<AvFramePtr> decode_representative_frame(
             } else {
                 frame_seconds = -1.0;
             }
-            if (frame_seconds >= 0.0 && frame_seconds <= target_seconds) {
+            if (frame_seconds < 0.0) {
+                // No timestamp (common for a single PNG/WebP frame). Keep the
+                // first decoded picture; a video walk continues in case a
+                // later packet does carry a timestamp.
+                if (!have_frame) {
+                    chosen = AvFramePtr(av_frame_clone(frame.get()));
+                    if (!chosen) {
+                        return VaultError{VaultErrorCode::CryptoFailure,
+                            "unable to clone FFmpeg frame"};
+                    }
+                    have_frame = true;
+                    if (single_frame) {
+                        reached_target = true;
+                    }
+                }
+            } else if (frame_seconds <= target_seconds) {
                 // Closest keyframe at/before the target so far.
                 if (!have_frame || frame_seconds >= chosen_seconds) {
                     chosen = AvFramePtr(av_frame_clone(frame.get()));
@@ -491,10 +515,121 @@ Result<std::pair<std::uint32_t, std::uint32_t>> scaled_dimensions(
     return std::pair{width, height};
 }
 
+// MJPEG's YUV420P encoder rejects odd width or height. PNG frames are often
+// odd (icons, cropped screenshots). Round up to the next even size.
+std::uint32_t even_jpeg_dimension(const std::uint32_t value) {
+    const auto even = value + (value & 1U);
+    return even < 2U ? 2U : even;
+}
+
+// Gallery surface (#10151d). JPEG has no alpha, so transparent PNG pixels are
+// composited onto this color instead of becoming black holes or a white box.
+constexpr unsigned char kThumbBackgroundR = 16;
+constexpr unsigned char kThumbBackgroundG = 21;
+constexpr unsigned char kThumbBackgroundB = 29;
+
+bool format_needs_opaque_flatten(const AVPixelFormat format) {
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(format);
+    if (desc == nullptr) {
+        return false;
+    }
+    return (desc->flags & (AV_PIX_FMT_FLAG_ALPHA | AV_PIX_FMT_FLAG_PAL)) != 0;
+}
+
+void composite_bgra(
+    unsigned char* pixels,
+    const int linesize,
+    const int width,
+    const int height) {
+    for (int y = 0; y < height; ++y) {
+        auto* row = pixels + static_cast<std::size_t>(y) * static_cast<std::size_t>(linesize);
+        for (int x = 0; x < width; ++x) {
+            unsigned char* pixel = row + static_cast<std::size_t>(x) * 4U;
+            const unsigned int alpha = pixel[3];
+            if (alpha == 255U) {
+                continue;
+            }
+            const unsigned int inverse = 255U - alpha;
+            pixel[0] = static_cast<unsigned char>(
+                (pixel[0] * alpha + static_cast<unsigned int>(kThumbBackgroundB) * inverse) / 255U);
+            pixel[1] = static_cast<unsigned char>(
+                (pixel[1] * alpha + static_cast<unsigned int>(kThumbBackgroundG) * inverse) / 255U);
+            pixel[2] = static_cast<unsigned char>(
+                (pixel[2] * alpha + static_cast<unsigned int>(kThumbBackgroundR) * inverse) / 255U);
+            pixel[3] = 255;
+        }
+    }
+}
+
+Result<AvFramePtr> flatten_to_opaque_bgra(const AVFrame* source) {
+    SwsPtr scaler(sws_getContext(
+        source->width, source->height, static_cast<AVPixelFormat>(source->format),
+        source->width, source->height, AV_PIX_FMT_BGRA,
+        SWS_BILINEAR, nullptr, nullptr, nullptr));
+    if (!scaler) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg scaler"};
+    }
+    AvFramePtr flattened(av_frame_alloc());
+    if (!flattened) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg frame"};
+    }
+    flattened->format = AV_PIX_FMT_BGRA;
+    flattened->width = source->width;
+    flattened->height = source->height;
+    flattened->color_range = AVCOL_RANGE_JPEG;
+    const int status = av_frame_get_buffer(flattened.get(), 0);
+    if (status < 0) {
+        return media_error("allocate flattened frame", status);
+    }
+    if (sws_scale(scaler.get(), source->data, source->linesize, 0, source->height,
+            flattened->data, flattened->linesize) < 0) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to flatten the frame"};
+    }
+    composite_bgra(
+        flattened->data[0], flattened->linesize[0], source->width, source->height);
+    return flattened;
+}
+
+void apply_jpeg_color_range(SwsContext* scaler, const AVFrame* source) {
+    const auto format = static_cast<AVPixelFormat>(source->format);
+    const AVPixFmtDescriptor* desc = av_pix_fmt_desc_get(format);
+    // RGB, gray, and palette frames (PNG) are full range. Only planar YUV is
+    // limited-range unless the frame says otherwise. Treating a PNG as MPEG
+    // limited range and then tagging the JPEG as full range makes it dark.
+    const bool yuv = desc != nullptr
+        && (desc->flags & (AV_PIX_FMT_FLAG_RGB | AV_PIX_FMT_FLAG_PAL)) == 0
+        && desc->nb_components >= 3;
+    const bool full_range = !yuv
+        || source->color_range == AVCOL_RANGE_JPEG
+        || format == AV_PIX_FMT_YUVJ420P
+        || format == AV_PIX_FMT_YUVJ422P
+        || format == AV_PIX_FMT_YUVJ444P
+        || format == AV_PIX_FMT_YUVJ440P;
+    const int* coefficients = sws_getCoefficients(SWS_CS_ITU601);
+    sws_setColorspaceDetails(
+        scaler, coefficients, full_range ? 1 : 0, coefficients, 1,
+        0, 1 << 16, 1 << 16);
+}
+
 Result<std::vector<unsigned char>> encode_jpeg(
     const AVFrame* source,
-    const std::uint32_t width,
-    const std::uint32_t height) {
+    std::uint32_t width,
+    std::uint32_t height) {
+    width = even_jpeg_dimension(width);
+    height = even_jpeg_dimension(height);
+    const AVFrame* pixels = source;
+    AvFramePtr flattened;
+    if (format_needs_opaque_flatten(static_cast<AVPixelFormat>(source->format))) {
+        auto flat = flatten_to_opaque_bgra(source);
+        if (!flat) {
+            return flat.error();
+        }
+        flattened = std::move(flat.value());
+        pixels = flattened.get();
+    }
     const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
     if (encoder == nullptr) {
         return VaultError{VaultErrorCode::UnsupportedVideoFormat,
@@ -516,14 +651,17 @@ Result<std::vector<unsigned char>> encode_jpeg(
     }
 
     SwsPtr scaler(sws_getContext(
-        source->width, source->height,
-        static_cast<AVPixelFormat>(source->format),
+        pixels->width, pixels->height,
+        static_cast<AVPixelFormat>(pixels->format),
         static_cast<int>(width), static_cast<int>(height),
         AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr));
     if (!scaler) {
         return VaultError{VaultErrorCode::CryptoFailure,
             "unable to allocate FFmpeg scaler"};
     }
+    // PNG/RGB is full range. Leaving swscale at MPEG limited range and then
+    // tagging the JPEG as full range makes the thumbnail look dark and dull.
+    apply_jpeg_color_range(scaler.get(), pixels);
 
     AvFramePtr scaled(av_frame_alloc());
     if (!scaled) {
@@ -533,12 +671,13 @@ Result<std::vector<unsigned char>> encode_jpeg(
     scaled->format = AV_PIX_FMT_YUV420P;
     scaled->width = static_cast<int>(width);
     scaled->height = static_cast<int>(height);
+    scaled->color_range = AVCOL_RANGE_JPEG;
     status = av_frame_get_buffer(scaled.get(), 0);
     if (status < 0) {
         return media_error("allocate scaled frame", status);
     }
     status = sws_scale(scaler.get(),
-        source->data, source->linesize, 0, source->height,
+        pixels->data, pixels->linesize, 0, pixels->height,
         scaled->data, scaled->linesize);
     if (status < 0) {
         return media_error("scale video frame", status);
@@ -614,13 +753,14 @@ Result<std::vector<unsigned char>> extract_thumbnail_jpeg(
     if (!dimensions) {
         return dimensions.error();
     }
-    auto jpeg = encode_jpeg(
-        frame.value().get(), dimensions.value().first, dimensions.value().second);
+    const auto jpeg_width = even_jpeg_dimension(dimensions.value().first);
+    const auto jpeg_height = even_jpeg_dimension(dimensions.value().second);
+    auto jpeg = encode_jpeg(frame.value().get(), jpeg_width, jpeg_height);
     if (!jpeg) {
         return jpeg.error();
     }
-    out_width = dimensions.value().first;
-    out_height = dimensions.value().second;
+    out_width = jpeg_width;
+    out_height = jpeg_height;
     return jpeg;
 }
 

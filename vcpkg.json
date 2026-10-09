@@ -15,7 +15,8 @@
         "avformat",
         "swscale",
         "swresample",
-        "ffmpeg"
+        "ffmpeg",
+        "zlib"
       ]
     }
   ]
