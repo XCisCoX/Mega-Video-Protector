@@ -1,6 +1,7 @@
 package org.megavideoprotect.app
 
 import android.os.Bundle
+import android.os.SystemClock
 import androidx.activity.ComponentActivity
 import androidx.activity.compose.BackHandler
 import androidx.activity.compose.setContent
@@ -9,49 +10,70 @@ import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.material3.MaterialTheme
 import androidx.compose.runtime.getValue
 import androidx.compose.runtime.mutableStateOf
-import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Modifier
 import androidx.core.view.WindowCompat
 
+/** Survives leaving the app, as long as the process is still alive. */
+private object AppSession {
+    var screen: Screen = Screen.Login
+    var leftAt: Long = 0L
+}
+
 class MainActivity : ComponentActivity() {
+    private var screen by mutableStateOf<Screen>(Screen.Login)
+
+    private fun show(next: Screen) {
+        screen = next
+        AppSession.screen = next
+    }
+
+    private fun unlocked(): Boolean =
+        RemoteVault.connected() || runCatching { CoreBridge.nativeIsUnlocked() }.getOrDefault(false)
+
+    private fun awayTooLong(): Boolean {
+        val limit = VaultLocation.idleLockMs(this)
+        if (limit <= 0L || AppSession.leftAt == 0L) return false
+        return SystemClock.elapsedRealtime() - AppSession.leftAt >= limit
+    }
+
+    private fun lockNow() {
+        if (RemoteVault.connected()) RemoteVault.disconnect()
+        else runCatching { CoreBridge.nativeLock() }
+        GalleryCache.clear()
+        show(Screen.Login)
+    }
 
     override fun onCreate(savedInstanceState: Bundle?) {
         super.onCreate(savedInstanceState)
         WindowCompat.setDecorFitsSystemWindows(window, false)
 
-        // The vault location is user-selectable (see VaultLocation); fall back
-        // to the private sandbox when nothing has been chosen yet. No storage
-        // permission is needed for either root.
         val vaultRoot = VaultLocation.saved(this) ?: filesDir.absolutePath
         val locationOptions = runCatching { VaultLocation.options(this) }
             .getOrDefault(listOf(filesDir.absolutePath))
-
-        // Deterministic: no network / IO in composition — the vault check runs
-        // once here, before the first frame.
         val vaultExists = runCatching { CoreBridge.nativeVaultExists(vaultRoot) }.getOrDefault(false)
+        val open = unlocked()
+        if (open && awayTooLong()) {
+            if (RemoteVault.connected()) RemoteVault.disconnect()
+            else runCatching { CoreBridge.nativeLock() }
+            GalleryCache.clear()
+            show(Screen.Login)
+        } else if (open && AppSession.screen !is Screen.Login && AppSession.screen !is Screen.Setup) {
+            show(AppSession.screen)
+        } else if (vaultExists) {
+            show(Screen.Login)
+        } else {
+            show(Screen.Setup)
+        }
 
         setContent {
             MaterialTheme(colorScheme = MvpColorScheme) {
-                // Resume where the user left off: the unlock page when a vault
-                // already exists in the sandbox, setup otherwise.
-                var screen by remember {
-                    mutableStateOf<Screen>(if (vaultExists) Screen.Login else Screen.Setup)
-                }
-
-                // System back / gesture: leave the media player or the image
-                // viewer, lock the vault.
+                // Back leaves the player for the library. From the library or
+                // the login screen it leaves the app without locking.
                 BackHandler(enabled = screen !is Screen.Setup) {
-                    screen = when (screen) {
-                        is Screen.Player -> Screen.Vault
-                        is Screen.Image -> Screen.Vault
-                        is Screen.Vault -> {
-                            if (RemoteVault.connected()) RemoteVault.disconnect()
-                            else runCatching { CoreBridge.nativeLock() }
-                            GalleryCache.clear()
-                            Screen.Login
-                        }
-                        else -> Screen.Setup
+                    when (screen) {
+                        is Screen.Player, is Screen.Image -> show(Screen.Vault)
+                        else -> moveTaskToBack(true)
                     }
                 }
 
@@ -60,45 +82,41 @@ class MainActivity : ComponentActivity() {
                         is Screen.Setup -> SetupScreen(
                             vaultLocation = vaultRoot,
                             locationOptions = locationOptions,
-                            onCreated = { screen = Screen.Vault },
-                            onOpenExisting = { screen = Screen.Login },
+                            onCreated = { show(Screen.Vault) },
+                            onOpenExisting = { show(Screen.Login) },
                         )
                         is Screen.Login -> LoginScreen(
                             vaultLocation = vaultRoot,
                             locationOptions = locationOptions,
-                            onUnlocked = { screen = Screen.Vault },
-                            onBack = { screen = Screen.Setup },
+                            onUnlocked = { show(Screen.Vault) },
+                            onBack = { show(Screen.Setup) },
                         )
                         is Screen.Vault -> VaultScreen(
                             vaultLocation = RemoteVault.label() ?: vaultRoot,
-                            onLock = {
-                                if (RemoteVault.connected()) RemoteVault.disconnect()
-                                else runCatching { CoreBridge.nativeLock() }
-                                screen = Screen.Login
-                            },
-                            // A still image has no stream to play, so it opens in
-                            // the image viewer; everything else in the player.
+                            onLock = { lockNow() },
                             onPlay = { id, name, playlist ->
-                                screen = if (isImageName(name)) {
-                                    Screen.Image(id, name)
-                                } else {
-                                    val playable = playlist
-                                        .filter { !isImageName(it.name) }
-                                        .map { PlayItem(it.id, it.name) }
-                                    Screen.Player(id, name, playable)
-                                }
+                                show(
+                                    if (isImageName(name)) {
+                                        Screen.Image(id, name)
+                                    } else {
+                                        val playable = playlist
+                                            .filter { !isImageName(it.name) }
+                                            .map { PlayItem(it.id, it.name) }
+                                        Screen.Player(id, name, playable)
+                                    },
+                                )
                             },
                         )
                         is Screen.Player -> PlayerScreen(
                             videoId = current.videoId,
                             name = current.name,
                             playlist = current.playlist,
-                            onBack = { screen = Screen.Vault },
+                            onBack = { show(Screen.Vault) },
                         )
                         is Screen.Image -> ImageViewerScreen(
                             videoId = current.videoId,
                             name = current.name,
-                            onBack = { screen = Screen.Vault },
+                            onBack = { show(Screen.Vault) },
                         )
                     }
                 }
@@ -106,9 +124,15 @@ class MainActivity : ComponentActivity() {
         }
     }
 
-    override fun onDestroy() {
-        RemoteVault.disconnect()
-        runCatching { CoreBridge.nativeClose() }
-        super.onDestroy()
+    override fun onStart() {
+        super.onStart()
+        val inside = screen is Screen.Vault || screen is Screen.Player || screen is Screen.Image
+        if (inside && awayTooLong()) lockNow()
+        AppSession.leftAt = 0L
+    }
+
+    override fun onStop() {
+        AppSession.leftAt = SystemClock.elapsedRealtime()
+        super.onStop()
     }
 }

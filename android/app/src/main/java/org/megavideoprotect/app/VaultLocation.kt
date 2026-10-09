@@ -38,6 +38,29 @@ object VaultLocation {
             .edit().putString(KEY_PATH, path).apply()
     }
 
+    private const val KEY_IDLE = "idle_lock_ms"
+    /** Leaving the app locks it only after this long. Zero means never. */
+    const val DEFAULT_IDLE_MS = 60L * 60L * 1000L
+    val idleChoices: List<Pair<Long, String>> = listOf(
+        0L to "Never",
+        15L * 60L * 1000L to "15 minutes",
+        DEFAULT_IDLE_MS to "1 hour",
+        4L * 60L * 60L * 1000L to "4 hours",
+    )
+
+    fun idleLockMs(context: Context): Long =
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE).getLong(KEY_IDLE, DEFAULT_IDLE_MS)
+
+    fun idleLockLabel(context: Context): String {
+        val ms = idleLockMs(context)
+        return idleChoices.firstOrNull { it.first == ms }?.second ?: "1 hour"
+    }
+
+    fun saveIdleLock(context: Context, ms: Long) {
+        context.getSharedPreferences(PREFS, Context.MODE_PRIVATE)
+            .edit().putLong(KEY_IDLE, ms).apply()
+    }
+
     /** A plain name for the unlock screen. The raw path stays off that page. */
     fun shortName(context: Context, path: String): String = when {
         path == context.filesDir.absolutePath -> "App-private (recommended)"

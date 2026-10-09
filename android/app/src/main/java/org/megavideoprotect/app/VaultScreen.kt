@@ -10,6 +10,7 @@ import androidx.activity.result.PickVisualMediaRequest
 import androidx.activity.result.contract.ActivityResultContracts
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
 import androidx.compose.foundation.clickable
 import androidx.compose.foundation.combinedClickable
 import androidx.compose.foundation.layout.Arrangement
@@ -20,18 +21,24 @@ import androidx.compose.foundation.layout.Spacer
 import androidx.compose.foundation.layout.aspectRatio
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.ExperimentalLayoutApi
+import androidx.compose.foundation.layout.FlowRow
+import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.heightIn
 import androidx.compose.foundation.rememberScrollState
 import androidx.compose.foundation.text.BasicTextField
 import androidx.compose.foundation.verticalScroll
+import androidx.compose.foundation.layout.navigationBarsPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.width
 import androidx.compose.foundation.shape.CircleShape
 import androidx.compose.foundation.lazy.LazyColumn
 import androidx.compose.foundation.lazy.grid.GridCells
+import androidx.compose.foundation.lazy.grid.GridItemSpan
 import androidx.compose.foundation.lazy.grid.LazyVerticalGrid
 import androidx.compose.foundation.lazy.grid.items
 import androidx.compose.foundation.lazy.items
@@ -57,6 +64,11 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.rememberCoroutineScope
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
+import androidx.compose.ui.geometry.Offset
+import androidx.compose.ui.graphics.Brush
+import androidx.compose.ui.graphics.Shadow
+import androidx.compose.ui.layout.onSizeChanged
+import androidx.compose.ui.platform.LocalDensity
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
@@ -72,7 +84,13 @@ import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 import androidx.compose.ui.window.Dialog
+import dev.chrisbanes.haze.HazeStyle
+import dev.chrisbanes.haze.HazeTint
+import dev.chrisbanes.haze.hazeEffect
+import dev.chrisbanes.haze.hazeSource
+import dev.chrisbanes.haze.rememberHazeState
 import kotlinx.coroutines.Dispatchers
+import kotlinx.coroutines.delay
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 import org.json.JSONObject
@@ -95,6 +113,10 @@ object GalleryCache {
     var viewMode = 0
     var filterTagId = 0L
     var search = ""
+    var sortKey by mutableStateOf(SortKey.Name)
+    var sortAscending by mutableStateOf(true)
+    var mediaVersion by mutableStateOf(0)
+    val media = HashMap<Long, MediaInfo>()
     // Scroll position per view mode. The gallery screen is torn down while the
     // player is open, so a scroll state remembered inside it reset to the top:
     // playing something from the middle of the list dropped you back to item 1.
@@ -110,12 +132,39 @@ object GalleryCache {
         thumbs["$id:$size"] = bitmap
     }
 
+    fun noteMedia(id: Long, info: MediaInfo) {
+        if (media[id] == info) return
+        media[id] = info
+        mediaVersion++
+    }
+
     fun clear() {
         vaultLocation = null
         videos = emptyList()
         tags = emptyList()
         loaded = false
         thumbs.clear()
+        media.clear()
+        mediaVersion++
+    }
+}
+
+enum class SortKey(val label: String) {
+    Name("Name"),
+    Size("Size"),
+    Duration("Duration"),
+    Resolution("Resolution"),
+    Codec("Codec"),
+    Tags("Tags"),
+    Imported("Imported"),
+}
+
+private fun applySort(key: SortKey) {
+    if (GalleryCache.sortKey == key) {
+        GalleryCache.sortAscending = !GalleryCache.sortAscending
+    } else {
+        GalleryCache.sortKey = key
+        GalleryCache.sortAscending = true
     }
 }
 
@@ -133,30 +182,30 @@ data class MediaInfo(val durationMs: Long, val width: Int, val height: Int, val 
     val codecText: String get() = codec.ifBlank { "…" }
 }
 
+private fun loadMedia(id: Long): MediaInfo? = runCatching {
+    val raw = if (RemoteVault.connected()) {
+        RemoteVault.getText("/v1/media?id=$id") ?: "{}"
+    } else {
+        CoreBridge.nativeMediaInfo(id)
+    }
+    val o = JSONObject(raw)
+    if (!o.has("width") && !o.has("durationMs")) return null
+    MediaInfo(
+        durationMs = o.optLong("durationMs", 0),
+        width = o.optInt("width", 0),
+        height = o.optInt("height", 0),
+        codec = o.optString("codec", ""),
+    )
+}.getOrNull()
+
 @Composable
 private fun rememberMediaInfo(id: Long): MediaInfo? {
-    var info by remember(id) { mutableStateOf<MediaInfo?>(null) }
+    var info by remember(id) { mutableStateOf(GalleryCache.media[id]) }
     LaunchedEffect(id) {
-        info = withContext(Dispatchers.Default) {
-            runCatching {
-                val raw = if (RemoteVault.connected()) {
-                    RemoteVault.getText("/v1/media?id=$id") ?: "{}"
-                } else {
-                    CoreBridge.nativeMediaInfo(id)
-                }
-                val o = JSONObject(raw)
-                if (o.has("width") || o.has("durationMs")) {
-                    MediaInfo(
-                        durationMs = o.optLong("durationMs", 0),
-                        width = o.optInt("width", 0),
-                        height = o.optInt("height", 0),
-                        codec = o.optString("codec", ""),
-                    )
-                } else {
-                    null
-                }
-            }.getOrNull()
-        }
+        if (info != null) return@LaunchedEffect
+        val loaded = withContext(Dispatchers.Default) { loadMedia(id) }
+        info = loaded
+        if (loaded != null) GalleryCache.noteMedia(id, loaded)
     }
     return info
 }
@@ -475,94 +524,30 @@ fun VaultScreen(
         if (uri != null) restoreSelected(uri)
     }
 
-    Column(
+    val haze = rememberHazeState()
+    val density = LocalDensity.current
+    var topInset by remember { mutableStateOf(0) }
+    var bottomInset by remember { mutableStateOf(0) }
+    val contentPad = PaddingValues(
+        top = with(density) { topInset.toDp() },
+        bottom = with(density) { bottomInset.toDp() },
+    )
+    val glass = HazeStyle(
+        backgroundColor = Color(0xC4101014),
+        tints = listOf(HazeTint(Color.Black.copy(alpha = 0.28f))),
+        blurRadius = 32.dp,
+        noiseFactor = 0.03f,
+    )
+
+    Box(
         Modifier
             .fillMaxSize()
-            .background(Mvp.window)
-            // The activity draws edge to edge. Keep the toolbar under the
-            // status bar and the path/count row above the navigation bar.
-            .safeDrawingPadding(),
+            .background(Color.Black),
     ) {
-        GalleryHeader(
-            viewMode = viewMode,
-            tags = tags,
-            filterTagId = filterTagId,
-            search = search,
-            onViewMode = { mode ->
-                viewMode = mode
-                GalleryCache.viewMode = mode
-            },
-            onFilterTag = { id ->
-                filterTagId = id
-                GalleryCache.filterTagId = id
-            },
-            onSearch = { text ->
-                search = text
-                GalleryCache.search = text
-            },
-            onImport = import@{
-                if (RemoteVault.connected()) {
-                    error = "This vault is open on your PC. Import on the PC."
-                    return@import
-                }
-                // Photos *and* videos: the vault stores opaque packages, and
-                // the core's probe/thumbnail path handles single-frame media
-                // (images) by decoding the first frame.
-                galleryLauncher.launch(
-                    PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
-                )
-            },
-            onFiles = files@{
-                if (RemoteVault.connected()) {
-                    error = "This vault is open on your PC. Import on the PC."
-                    return@files
-                }
-                fileLauncher.launch(
-                    arrayOf("video/*", "image/*", "application/octet-stream")
-                )
-            },
-            onSettings = {
-                if (RemoteVault.connected()) {
-                    error = "Change the password and tags on the PC."
-                } else {
-                    showSettings = true
-                }
-            },
-            onLock = {
-                if (RemoteVault.connected()) {
-                    RemoteVault.disconnect()
-                } else {
-                    scope.launch { withContext(Dispatchers.Default) { CoreBridge.nativeLock() } }
-                }
-                GalleryCache.clear()
-                onLock()
-            },
-        )
-        Box(Modifier.fillMaxWidth().height(1.dp).background(Mvp.cardBorder))
-
-        // Import progress (byte-level, whole batch) + error banner.
-        importProgress?.let { fraction ->
-            Column(Modifier.fillMaxWidth().background(Mvp.headerBg).padding(horizontal = 12.dp, vertical = 6.dp)) {
-                LinearProgressIndicator(
-                    progress = { fraction.coerceIn(0f, 1f) },
-                    modifier = Modifier.fillMaxWidth(),
-                    color = Mvp.primary,
-                    trackColor = Mvp.sliderGroove,
-                )
-                Text(
-                    "${(fraction * 100).toInt()}%  $importLabel",
-                    color = Mvp.description,
-                    fontSize = 11.sp,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                )
-            }
-        }
-        MvpError(error, Modifier.padding(horizontal = 12.dp))
-
         if (showSettings) {
             SettingsDialog(
                 currentTags = tags,
+                remote = RemoteVault.connected(),
                 onDismiss = { showSettings = false },
                 onChanged = { refresh() },
             )
@@ -571,6 +556,43 @@ fun VaultScreen(
         val filtered = videos.filter { v ->
             (filterTagId == 0L || v.tags.any { t -> tags.firstOrNull { it.id == filterTagId }?.name?.equals(t, true) == true }) &&
                 (search.isBlank() || v.name.contains(search, ignoreCase = true))
+        }
+        val sortKey = GalleryCache.sortKey
+        val sortAscending = GalleryCache.sortAscending
+        val mediaVersion = GalleryCache.mediaVersion
+        val shown = remember(filtered, sortKey, sortAscending, mediaVersion) {
+            val cmp = Comparator<VideoEntry> { a, b ->
+                val primary = when (sortKey) {
+                    SortKey.Name -> a.name.compareTo(b.name, ignoreCase = true)
+                    SortKey.Size -> a.size.compareTo(b.size)
+                    SortKey.Duration ->
+                        (GalleryCache.media[a.id]?.durationMs ?: 0L)
+                            .compareTo(GalleryCache.media[b.id]?.durationMs ?: 0L)
+                    SortKey.Resolution -> {
+                        fun pixels(v: VideoEntry) =
+                            GalleryCache.media[v.id]?.let { it.width.toLong() * it.height.toLong() } ?: 0L
+                        pixels(a).compareTo(pixels(b))
+                    }
+                    SortKey.Codec ->
+                        (GalleryCache.media[a.id]?.codec ?: "").compareTo(
+                            GalleryCache.media[b.id]?.codec ?: "",
+                            ignoreCase = true,
+                        )
+                    SortKey.Tags ->
+                        a.tags.joinToString(",").compareTo(b.tags.joinToString(","), ignoreCase = true)
+                    SortKey.Imported -> a.importedAt.compareTo(b.importedAt)
+                }
+                if (primary != 0) primary else a.name.compareTo(b.name, ignoreCase = true)
+            }
+            if (sortAscending) filtered.sortedWith(cmp) else filtered.sortedWith(cmp.reversed())
+        }
+        LaunchedEffect(sortKey, videos) {
+            if (sortKey != SortKey.Duration && sortKey != SortKey.Resolution && sortKey != SortKey.Codec) return@LaunchedEffect
+            for (v in videos) {
+                if (GalleryCache.media.containsKey(v.id)) continue
+                val loaded = withContext(Dispatchers.Default) { loadMedia(v.id) } ?: continue
+                GalleryCache.noteMedia(v.id, loaded)
+            }
         }
 
         val busy = importProgress != null
@@ -583,52 +605,133 @@ fun VaultScreen(
             if (selecting) {
                 selectedIds = if (v.id in selectedIds) selectedIds - v.id else selectedIds + v.id
             } else if (!busy) {
-                onPlay(v.id, v.name, filtered)
+                onPlay(v.id, v.name, shown)
             }
         }
         val pressItem: (VideoEntry) -> Unit = { v ->
             selectedIds = if (v.id in selectedIds) selectedIds - v.id else selectedIds + v.id
         }
 
-        if (selecting) {
-            Column(
-                Modifier
-                    .fillMaxWidth()
-                    .background(Mvp.selection)
-                    .padding(horizontal = 12.dp, vertical = 6.dp),
-                verticalArrangement = Arrangement.spacedBy(6.dp),
-            ) {
-                Text("${selectedIds.size} selected", color = Mvp.title, fontSize = 14.sp)
-                Row(
-                    Modifier.fillMaxWidth(),
-                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+        Box(Modifier.fillMaxSize().hazeSource(state = haze)) {
+            when (viewMode) {
+                0 -> DetailsView(shown, selectedIds, openItem, pressItem, openActions, contentPad)
+                1 -> IconGridView(shown, selectedIds, openItem, pressItem, contentPad)
+                else -> ListView(shown, selectedIds, openItem, pressItem, openActions, contentPad)
+            }
+        }
+
+        Column(
+            Modifier
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .onSizeChanged { topInset = it.height }
+                .hazeEffect(state = haze, style = glass)
+                .statusBarsPadding(),
+        ) {
+            GalleryHeader(
+                viewMode = viewMode,
+                tags = tags,
+                filterTagId = filterTagId,
+                search = search,
+                onViewMode = { mode ->
+                    viewMode = mode
+                    GalleryCache.viewMode = mode
+                },
+                onFilterTag = { id ->
+                    filterTagId = id
+                    GalleryCache.filterTagId = id
+                },
+                onSearch = { text ->
+                    search = text
+                    GalleryCache.search = text
+                },
+                onImport = import@{
+                    if (RemoteVault.connected()) {
+                        error = "This vault is open on your PC. Import on the PC."
+                        return@import
+                    }
+                    galleryLauncher.launch(
+                        PickVisualMediaRequest(ActivityResultContracts.PickVisualMedia.ImageAndVideo)
+                    )
+                },
+                onFiles = files@{
+                    if (RemoteVault.connected()) {
+                        error = "This vault is open on your PC. Import on the PC."
+                        return@files
+                    }
+                    fileLauncher.launch(arrayOf("video/*", "image/*", "application/octet-stream"))
+                },
+                onSettings = { showSettings = true },
+                onLock = onLock,
+            )
+            if (selecting) {
+                Column(
+                    Modifier
+                        .fillMaxWidth()
+                        .padding(horizontal = 12.dp, vertical = 6.dp),
+                    verticalArrangement = Arrangement.spacedBy(6.dp),
                 ) {
-                    MvpButton("Remove", onClick = { confirmRemove = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                    MvpButton("Restore", onClick = { restoreLauncher.launch(null) }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                    MvpButton("Tag", onClick = { showTags = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
-                    MvpButton("Cancel", onClick = { selectedIds = emptySet() }, enabled = !actionBusy, modifier = Modifier.weight(1f))
+                    Text("${selectedIds.size} selected", color = Mvp.title, fontSize = 14.sp)
+                    Row(Modifier.fillMaxWidth(), horizontalArrangement = Arrangement.spacedBy(8.dp)) {
+                        MvpButton("Remove", onClick = { confirmRemove = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
+                        MvpButton("Restore", onClick = { restoreLauncher.launch(null) }, enabled = !actionBusy, modifier = Modifier.weight(1f))
+                        MvpButton("Tag", onClick = { showTags = true }, enabled = !actionBusy, modifier = Modifier.weight(1f))
+                        MvpButton("Cancel", onClick = { selectedIds = emptySet() }, enabled = !actionBusy, modifier = Modifier.weight(1f))
+                    }
+                }
+            }
+            importProgress?.let { fraction ->
+                Column(Modifier.fillMaxWidth().padding(horizontal = 12.dp, vertical = 6.dp)) {
+                    LinearProgressIndicator(
+                        progress = { fraction.coerceIn(0f, 1f) },
+                        modifier = Modifier.fillMaxWidth(),
+                        color = Mvp.primary,
+                        trackColor = Mvp.sliderGroove,
+                    )
+                    Text(
+                        "${(fraction * 100).toInt()}%  $importLabel",
+                        color = Mvp.description,
+                        fontSize = 11.sp,
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                    )
                 }
             }
         }
 
-        Box(Modifier.weight(1f).fillMaxWidth()) {
-            when (viewMode) {
-                0 -> DetailsView(filtered, selectedIds, openItem, pressItem, openActions)
-                1 -> IconGridView(filtered, selectedIds, openItem, pressItem)
-                else -> ListView(filtered, selectedIds, openItem, pressItem, openActions)
-            }
-        }
-
-        // Status bar (Qt: location + count, #666666).
         Row(
             Modifier
+                .align(Alignment.BottomCenter)
                 .fillMaxWidth()
-                .background(Mvp.window)
-                .padding(horizontal = 12.dp, vertical = 10.dp),
+                .onSizeChanged { bottomInset = it.height }
+                .hazeEffect(state = haze, style = glass)
+                .navigationBarsPadding()
+                .padding(horizontal = 16.dp, vertical = 10.dp),
             horizontalArrangement = Arrangement.SpaceBetween,
         ) {
-            Text(vaultLocation, color = Mvp.statusText, fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
-            Text("${filtered.size} items", color = Mvp.statusText, fontSize = 12.sp)
+            Text(vaultLocation, color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp, maxLines = 1, overflow = TextOverflow.Ellipsis, modifier = Modifier.weight(1f))
+            Text("${filtered.size} items", color = Color.White.copy(alpha = 0.86f), fontSize = 12.sp)
+        }
+
+        error?.let { message ->
+            LaunchedEffect(message) {
+                delay(4200)
+                if (error == message) error = null
+            }
+            Text(
+                message,
+                color = Color.White,
+                fontSize = 13.sp,
+                modifier = Modifier
+                    .align(Alignment.BottomCenter)
+                    .padding(bottom = with(density) { bottomInset.toDp() } + 10.dp)
+                    .padding(horizontal = 28.dp)
+                    .clip(RoundedCornerShape(16.dp))
+                    .hazeEffect(state = haze, style = glass)
+                    .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(16.dp))
+                    .clickable { error = null }
+                    .padding(horizontal = 16.dp, vertical = 10.dp),
+            )
         }
     }
 
@@ -647,27 +750,36 @@ fun VaultScreen(
                 Column(
                     Modifier
                         .fillMaxWidth()
-                        .heightIn(max = 320.dp)
+                        .heightIn(max = 240.dp)
                         .verticalScroll(rememberScrollState()),
-                    verticalArrangement = Arrangement.spacedBy(6.dp),
+                ) {
+                FlowRow(
+                    Modifier.fillMaxWidth(),
+                    horizontalArrangement = Arrangement.spacedBy(8.dp),
+                    verticalArrangement = Arrangement.spacedBy(8.dp),
                 ) {
                     tags.forEach { tag ->
                         val onAll = chosen.isNotEmpty() && chosen.all { item ->
                             item.tags.any { it.equals(tag.name, ignoreCase = true) }
                         }
-                        MvpButton(
-                            if (onAll) "✓  ${tag.name}" else tag.name,
+                        GlassChip(
+                            text = if (onAll) "✓  ${tag.name}" else tag.name,
+                            selected = onAll,
                             onClick = { toggleTagOnSelected(tag) },
                             enabled = !actionBusy,
-                            modifier = Modifier.fillMaxWidth(),
                         )
                     }
                 }
-                MvpButton(
-                    "Cancel",
-                    onClick = { showTags = false },
-                    enabled = !actionBusy,
-                    modifier = Modifier.fillMaxWidth(),
+                }
+                Text(
+                    "Done",
+                    color = Mvp.accent,
+                    fontSize = 16.sp,
+                    fontWeight = FontWeight.SemiBold,
+                    modifier = Modifier
+                        .align(Alignment.CenterHorizontally)
+                        .clickable(enabled = !actionBusy) { showTags = false }
+                        .padding(vertical = 4.dp),
                 )
             }
         }
@@ -749,10 +861,9 @@ private fun GalleryHeader(
     onSettings: () -> Unit,
     onLock: () -> Unit,
 ) {
-    Column(
+        Column(
         Modifier
             .fillMaxWidth()
-            .background(Mvp.headerBg)
             .padding(start = 16.dp, end = 10.dp, top = 8.dp, bottom = 12.dp),
         verticalArrangement = Arrangement.spacedBy(10.dp),
     ) {
@@ -782,7 +893,8 @@ private fun GalleryHeader(
                     .weight(1f)
                     .height(40.dp)
                     .clip(RoundedCornerShape(20.dp))
-                    .background(Mvp.inputBg)
+                    .background(Mvp.glass)
+                    .border(1.dp, Mvp.glassStroke, RoundedCornerShape(20.dp))
                     .padding(horizontal = 12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
@@ -826,9 +938,18 @@ private fun GalleryHeader(
                     }
                 }
             }
-            ViewModeButton(DetailsIcon, "Details", viewMode == 0) { onViewMode(0) }
-            ViewModeButton(GridIcon, "Icons", viewMode == 1) { onViewMode(1) }
-            ViewModeButton(Icons.Filled.List, "List", viewMode == 2) { onViewMode(2) }
+            Row(
+                Modifier
+                    .clip(RoundedCornerShape(20.dp))
+                    .background(Mvp.glass)
+                    .border(1.dp, Mvp.glassStroke, RoundedCornerShape(20.dp))
+                    .padding(2.dp),
+                verticalAlignment = Alignment.CenterVertically,
+            ) {
+                ViewModeButton(DetailsIcon, "Details", viewMode == 0) { onViewMode(0) }
+                ViewModeButton(GridIcon, "Icons", viewMode == 1) { onViewMode(1) }
+                ViewModeButton(Icons.Filled.List, "List", viewMode == 2) { onViewMode(2) }
+            }
             if (tags.isNotEmpty()) {
                 TagFilterButton(tags, filterTagId, onFilterTag)
             }
@@ -1120,21 +1241,38 @@ private fun DetailsView(
     onOpen: (VideoEntry) -> Unit,
     onLongPress: (VideoEntry) -> Unit,
     onAction: (VideoEntry) -> Unit,
+    padding: PaddingValues,
 ) {
-    LazyColumn(state = GalleryCache.detailsScroll, modifier = Modifier.fillMaxSize().background(Mvp.inputBg)) {
+    LazyColumn(
+        state = GalleryCache.detailsScroll,
+        contentPadding = padding,
+        modifier = Modifier.fillMaxSize().background(Color.Black),
+    ) {
         item {
             Row(
                 Modifier.fillMaxWidth().background(Mvp.headerBg).padding(horizontal = 10.dp, vertical = 6.dp),
                 horizontalArrangement = Arrangement.spacedBy(12.dp),
                 verticalAlignment = Alignment.CenterVertically,
             ) {
-                listOf("Name", "Size", "Duration", "Resolution", "Codec", "Tags", "Imported").forEachIndexed { i, h ->
+                listOf(
+                    SortKey.Name to 2.2f,
+                    SortKey.Size to 1f,
+                    SortKey.Duration to 1f,
+                    SortKey.Resolution to 1f,
+                    SortKey.Codec to 1f,
+                    SortKey.Tags to 1f,
+                    SortKey.Imported to 1f,
+                ).forEach { (key, weight) ->
+                    val active = GalleryCache.sortKey == key
+                    val mark = if (!active) "" else if (GalleryCache.sortAscending) " ↑" else " ↓"
                     Text(
-                        h,
-                        color = Mvp.headerText,
+                        key.label + mark,
+                        color = if (active) Mvp.accent else Mvp.headerText,
                         fontSize = 12.sp,
                         fontWeight = FontWeight.SemiBold,
-                        modifier = Modifier.weight(if (i == 0) 2.2f else 1f),
+                        maxLines = 1,
+                        overflow = TextOverflow.Ellipsis,
+                        modifier = Modifier.weight(weight).clickable { applySort(key) },
                     )
                 }
                 Spacer(Modifier.width(40.dp))
@@ -1178,16 +1316,19 @@ private fun IconGridView(
     selected: Set<Long>,
     onOpen: (VideoEntry) -> Unit,
     onLongPress: (VideoEntry) -> Unit,
+    padding: PaddingValues,
 ) {
-    // Three square columns, a hairline gap, no captions: the profile-grid look.
     LazyVerticalGrid(
         columns = GridCells.Fixed(3),
         state = GalleryCache.gridScroll,
+        contentPadding = padding,
         modifier = Modifier.fillMaxSize().background(Color.Black),
         horizontalArrangement = Arrangement.spacedBy(1.dp),
         verticalArrangement = Arrangement.spacedBy(1.dp),
     ) {
+        item(span = { GridItemSpan(3) }) { ListSortBar() }
         items(videos, key = { it.id }) { v ->
+            val media = rememberMediaInfo(v.id)
             Box(
                 Modifier
                     .fillMaxWidth()
@@ -1195,6 +1336,32 @@ private fun IconGridView(
                     .combinedClickable(onClick = { onOpen(v) }, onLongClick = { onLongPress(v) }),
             ) {
                 SquareThumb(v.id)
+                val duration = media?.durationText
+                if (duration != null && duration != "…" && media.durationMs > 0L) {
+                    Box(
+                        Modifier
+                            .align(Alignment.BottomCenter)
+                            .fillMaxWidth()
+                            .height(36.dp)
+                            .background(
+                                Brush.verticalGradient(
+                                    listOf(Color.Transparent, Color.Black.copy(alpha = 0.72f)),
+                                ),
+                            ),
+                    )
+                    Text(
+                        duration,
+                        color = Color.White,
+                        fontSize = 11.sp,
+                        fontWeight = FontWeight.SemiBold,
+                        style = TextStyle(
+                            shadow = Shadow(Color.Black, Offset(0f, 1f), 3f),
+                        ),
+                        modifier = Modifier
+                            .align(Alignment.BottomStart)
+                            .padding(start = 6.dp, bottom = 5.dp),
+                    )
+                }
                 if (v.id in selected) {
                     Box(Modifier.fillMaxSize().background(Color.Black.copy(alpha = 0.45f)))
                     Box(
@@ -1221,8 +1388,14 @@ private fun ListView(
     onOpen: (VideoEntry) -> Unit,
     onLongPress: (VideoEntry) -> Unit,
     onAction: (VideoEntry) -> Unit,
+    padding: PaddingValues,
 ) {
-    LazyColumn(state = GalleryCache.listScroll, modifier = Modifier.fillMaxSize().background(Mvp.inputBg)) {
+    LazyColumn(
+        state = GalleryCache.listScroll,
+        contentPadding = padding,
+        modifier = Modifier.fillMaxSize().background(Color.Black),
+    ) {
+        item { ListSortBar() }
         items(videos, key = { it.id }) { v ->
             val picked = v.id in selected
             Row(
@@ -1245,6 +1418,44 @@ private fun ListView(
                     Text("${v.sizeText} · ${v.tags.joinToString(", ")}", color = Mvp.description, fontSize = 11.sp, maxLines = 1, overflow = TextOverflow.Ellipsis)
                 }
                 RowActions { onAction(v) }
+            }
+        }
+    }
+}
+
+@Composable
+private fun ListSortBar() {
+    var open by remember { mutableStateOf(false) }
+    val key = GalleryCache.sortKey
+    val arrow = if (GalleryCache.sortAscending) "↑" else "↓"
+    Box(Modifier.fillMaxWidth()) {
+        Row(
+            Modifier
+                .fillMaxWidth()
+                .clickable { open = true }
+                .padding(horizontal = 12.dp, vertical = 8.dp),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(8.dp),
+        ) {
+            Text("Sort", color = Mvp.description, fontSize = 12.sp)
+            Text("$arrow  ${key.label}", color = Mvp.accent, fontSize = 13.sp, fontWeight = FontWeight.SemiBold)
+        }
+        DropdownMenu(expanded = open, onDismissRequest = { open = false }) {
+            SortKey.entries.forEach { item ->
+                val mark = if (item != key) "" else if (GalleryCache.sortAscending) "  ↑" else "  ↓"
+                DropdownMenuItem(
+                    text = {
+                        Text(
+                            item.label + mark,
+                            color = if (item == key) Mvp.accent else Mvp.text,
+                            fontSize = 14.sp,
+                        )
+                    },
+                    onClick = {
+                        open = false
+                        applySort(item)
+                    },
+                )
             }
         }
     }

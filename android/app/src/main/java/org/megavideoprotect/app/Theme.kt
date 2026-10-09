@@ -4,46 +4,47 @@ import androidx.compose.material3.darkColorScheme
 import androidx.compose.ui.graphics.Color
 
 /**
- * Exact color tokens from the desktop Qt theme (qt-app/.../theme.hpp):
- * window #0c0f15, cards #171c25 (border #2b3444, radius 16), inputs #10151d
- * (border #364154, focus #6f8cff), primary button #536fe8 (hover #627cf0,
- * border #6f88f4), accent #5b7cfa, selection #2b3a63, error #ff9a9a on
- * #321d24 with border #6a303a.
+ * Telegram night glass: near-black field, frosted panels, blue actions.
+ * Panels are a light veil with a hairline, the same idea as Telegram's
+ * blurred bars, drawn as glass because the phone UI is Compose.
  */
 object Mvp {
-    val window = Color(0xFF0C0F15)
-    val card = Color(0xFF171C25)
-    val cardBorder = Color(0xFF2B3444)
-    val inputBg = Color(0xFF10151D)
-    val inputBorder = Color(0xFF364154)
-    val inputFocusBorder = Color(0xFF6F8CFF)
-    val title = Color(0xFFF3F6FA)
-    val description = Color(0xFF9EABBA)
-    val text = Color(0xFFE2E7EF)
-    val placeholder = Color(0xFF707C8E)
-    val button = Color(0xFF252D3B)
-    val buttonBorder = Color(0xFF3A465A)
-    val buttonHover = Color(0xFF303A4B)
-    val buttonDisabled = Color(0xFF1D232D)
-    val buttonDisabledText = Color(0xFF697587)
-    val primary = Color(0xFF536FE8)
-    val primaryBorder = Color(0xFF6F88F4)
-    val primaryHover = Color(0xFF627CF0)
-    val accent = Color(0xFF5B7CFA)
-    val selection = Color(0xFF2B3A63)
-    val itemHover = Color(0xFF232C3D)
-    val alternateRow = Color(0xFF161C27)
-    val headerBg = Color(0xFF1A202C)
-    val headerText = Color(0xFFAAB6C8)
-    val errorText = Color(0xFFFF9A9A)
-    val errorBg = Color(0xFF321D24)
-    val errorBorder = Color(0xFF6A303A)
-    val sliderGroove = Color(0xFF2B3444)
-    val sliderFill = Color(0xFF536FE8)
-    val sliderHandle = Color(0xFF7F97F5)
-    val sliderHandleBorder = Color(0xFF9DB1F8)
-    val scrollbarHandle = Color(0xFF3A465A)
-    val statusText = Color(0xFF666666)
+    val window = Color(0xFF000000)
+    val card = Color(0xF21C1C1E)
+    val cardBorder = Color(0x24FFFFFF)
+    val glass = Color(0x14FFFFFF)
+    val glassStroke = Color(0x2EFFFFFF)
+    val inputBg = Color(0xFF141416)
+    val inputBorder = Color(0x1FFFFFFF)
+    val inputFocusBorder = Color(0xFF3390EC)
+    val title = Color(0xFFFFFFFF)
+    val description = Color(0xFF8E8E93)
+    val text = Color(0xFFF2F2F7)
+    val placeholder = Color(0xFF6D6D72)
+    val button = Color(0x1AFFFFFF)
+    val buttonBorder = Color(0x24FFFFFF)
+    val buttonHover = Color(0x26FFFFFF)
+    val buttonDisabled = Color(0xFF1C1C1E)
+    val buttonDisabledText = Color(0xFF636366)
+    val primary = Color(0xFF3390EC)
+    val primaryBorder = Color(0xFF3390EC)
+    val primaryHover = Color(0xFF4BA0F5)
+    val accent = Color(0xFF3390EC)
+    val selection = Color(0x663390EC)
+    val itemHover = Color(0xFF1C1C1E)
+    val alternateRow = Color(0xFF101012)
+    val headerBg = Color(0xE6101012)
+    val headerText = Color(0xFF8E8E93)
+    val errorText = Color(0xFFFF6B6B)
+    val errorBg = Color(0xFF2C1518)
+    val errorBorder = Color(0xFF5C2A30)
+    val sliderGroove = Color(0x33FFFFFF)
+    val sliderFill = Color(0xFF3390EC)
+    val sliderHandle = Color(0xFFFFFFFF)
+    val sliderHandleBorder = Color(0xFF3390EC)
+    val scrollbarHandle = Color(0xFF3A3A3C)
+    val statusText = Color(0xFF8E8E93)
+    val destructive = Color(0xFFFF453A)
 }
 
 val MvpColorScheme = darkColorScheme(

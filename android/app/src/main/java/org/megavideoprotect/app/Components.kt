@@ -3,6 +3,7 @@ package org.megavideoprotect.app
 import androidx.compose.foundation.BorderStroke
 import androidx.compose.foundation.background
 import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.BoxScope
@@ -36,6 +37,7 @@ import androidx.compose.runtime.remember
 import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
+import androidx.compose.ui.draw.clip
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.res.painterResource
@@ -46,16 +48,62 @@ import androidx.compose.ui.text.input.VisualTransformation
 import androidx.compose.ui.unit.dp
 import androidx.compose.ui.unit.sp
 
-/** Card replicating the Qt #card frame (bg #171c25, 1px #2b3444, radius 16). */
+/** Frosted panel: dark glass, hairline, large radius. */
 @Composable
 fun MvpCard(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
     Column(
         modifier = modifier
-            .background(Mvp.card, RoundedCornerShape(16.dp))
-            .border(1.dp, Mvp.cardBorder, RoundedCornerShape(16.dp))
-            .padding(horizontal = 28.dp, vertical = 26.dp),
-        verticalArrangement = Arrangement.spacedBy(14.dp),
+            .clip(RoundedCornerShape(22.dp))
+            .background(Mvp.card)
+            .border(1.dp, Mvp.glassStroke, RoundedCornerShape(22.dp))
+            .padding(horizontal = 18.dp, vertical = 18.dp),
+        verticalArrangement = Arrangement.spacedBy(12.dp),
         content = content
+    )
+}
+
+/** A settings group: one glass sheet, rows stacked with hairlines. */
+@Composable
+fun GlassGroup(modifier: Modifier = Modifier, content: @Composable ColumnScope.() -> Unit) {
+    Column(
+        modifier
+            .fillMaxWidth()
+            .clip(RoundedCornerShape(16.dp))
+            .background(Mvp.glass)
+            .border(1.dp, Mvp.glassStroke, RoundedCornerShape(16.dp)),
+        content = content,
+    )
+}
+
+@Composable
+fun SectionLabel(text: String) {
+    Text(
+        text,
+        color = Mvp.description,
+        fontSize = 13.sp,
+        fontWeight = FontWeight.Medium,
+        modifier = Modifier.padding(start = 4.dp),
+    )
+}
+
+/** Pill used for tags. Selected pills are the blue action color. */
+@Composable
+fun GlassChip(
+    text: String,
+    selected: Boolean,
+    onClick: () -> Unit,
+    enabled: Boolean = true,
+) {
+    Text(
+        text,
+        color = if (selected) Color.White else Mvp.text,
+        fontSize = 14.sp,
+        modifier = Modifier
+            .clip(RoundedCornerShape(20.dp))
+            .background(if (selected) Mvp.accent else Mvp.glass)
+            .border(1.dp, if (selected) Mvp.accent else Mvp.glassStroke, RoundedCornerShape(20.dp))
+            .clickable(enabled = enabled, onClick = onClick)
+            .padding(horizontal = 14.dp, vertical = 8.dp),
     )
 }
 
@@ -91,7 +139,7 @@ fun MvpInput(
         enabled = enabled,
         textStyle = TextStyle(color = Mvp.title, fontSize = 14.sp),
         keyboardOptions = KeyboardOptions.Default,
-        shape = RoundedCornerShape(8.dp),
+        shape = RoundedCornerShape(14.dp),
         colors = OutlinedTextFieldDefaults.colors(
             focusedTextColor = Mvp.title,
             unfocusedTextColor = Mvp.title,
@@ -110,7 +158,7 @@ fun MvpInput(
     )
 }
 
-/** Button replicating QPushButton (secondary: #252d3b/#3a465a; primary: #536fe8). */
+/** Capsule button. Primary is Telegram blue; the rest are glass. */
 @Composable
 fun MvpButton(
     text: String,
@@ -137,8 +185,8 @@ fun MvpButton(
     Button(
         onClick = onClick,
         enabled = enabled,
-        modifier = modifier.height(39.dp),
-        shape = RoundedCornerShape(8.dp),
+        modifier = modifier.height(44.dp),
+        shape = RoundedCornerShape(22.dp),
         colors = ButtonDefaults.buttonColors(
             containerColor = bg,
             contentColor = fg,

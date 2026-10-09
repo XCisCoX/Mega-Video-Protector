@@ -1,15 +1,21 @@
 #pragma once
 
 #include <QDialog>
+#include <QEvent>
+#include <QImage>
 
 #include <memory>
 #include <utility>
 
 class QComboBox;
+class QFrame;
 class QLabel;
 class QLineEdit;
 class QListWidget;
+class QMouseEvent;
+class QPaintEvent;
 class QPushButton;
+class QShowEvent;
 
 template <typename T>
 class QFutureWatcher;
@@ -36,6 +42,11 @@ public:
 signals:
     void settingsChanged();
 
+protected:
+    void paintEvent(QPaintEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void mousePressEvent(QMouseEvent* event) override;
+
 private:
     void reloadTags();
     void beginPasswordChange();
@@ -47,6 +58,7 @@ private:
     void beginRegenerateMissing();
     void finishRegenerateMissing();
     void setStatus(const QString& message, bool error = false);
+    bool eventFilter(QObject* watched, QEvent* event) override;
 
     std::shared_ptr<videovault::core::Vault> vault_;
 
@@ -60,6 +72,7 @@ private:
 
     // Tags section.
     QListWidget* tagList_{nullptr};
+    QLineEdit* newTagEdit_{nullptr};
     QPushButton* addTagButton_{nullptr};
     QPushButton* renameTagButton_{nullptr};
     QPushButton* removeTagButton_{nullptr};
@@ -72,6 +85,7 @@ private:
     QFutureWatcher<std::shared_ptr<std::pair<int, int>>>* regenerateWatcher_{nullptr};
 
     QLabel* status_{nullptr};
+    QImage backdrop_;
 };
 
 } // namespace videovault::app

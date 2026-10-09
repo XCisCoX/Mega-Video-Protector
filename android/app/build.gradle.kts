@@ -82,4 +82,6 @@ dependencies {
     implementation("androidx.media3:media3-ui:1.6.1")
     // Login-screen scanner for the PC share code.
     implementation("com.journeyapps:zxing-android-embedded:4.3.0")
+    // Frosted bars: the library draws behind the header and footer.
+    implementation("dev.chrisbanes.haze:haze:1.6.1")
 }

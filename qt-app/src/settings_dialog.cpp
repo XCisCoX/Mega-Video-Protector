@@ -4,9 +4,9 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#include "videovault/app/glass.hpp"
+
 #include <QComboBox>
-#include <QDialogButtonBox>
-#include <QFormLayout>
 #include <QFrame>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
@@ -14,8 +14,11 @@
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
+#include <QMouseEvent>
+#include <QPainter>
 #include <QPushButton>
 #include <QSettings>
+#include <QShowEvent>
 #include <QVBoxLayout>
 
 #include <utility>
@@ -27,88 +30,206 @@ SettingsDialog::SettingsDialog(
     QWidget* parent)
     : QDialog(parent),
       vault_(vault) {
-    setWindowTitle(QStringLiteral("Vault settings"));
+    setWindowTitle(QStringLiteral("Settings"));
     setModal(true);
-    resize(460, 520);
+    setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+    setAttribute(Qt::WA_TranslucentBackground);
 
-    auto* layout = new QVBoxLayout(this);
+    auto* outer = new QVBoxLayout(this);
+    outer->setContentsMargins(48, 48, 48, 48);
+    outer->addStretch(1);
 
-    // --- Security: change the vault password. ---
-    auto* securityBox = new QFrame(this);
+    auto* sheet = new QFrame(this);
+    sheet->setObjectName(QStringLiteral("sheet"));
+    sheet->setAttribute(Qt::WA_StyledBackground, true);
+    sheet->setFixedWidth(440);
+    sheet->setStyleSheet(QStringLiteral(
+        "QFrame#sheet { background: #121214; border-radius: 18px; }"
+        "QFrame#settingsGroup { background: #1c1c1e; border: none; border-radius: 14px; }"
+        "QFrame#sheet QLineEdit, QFrame#sheet QComboBox {"
+        "  background: transparent; border: none; border-radius: 0; min-height: 40px; color: white; }"
+        "QFrame#sheet QComboBox QAbstractItemView {"
+        "  background: #1c1c1e; color: white; selection-background-color: #3390ec; }"
+        "QPushButton#sheetAction {"
+        "  background: transparent; border: none; color: #3390ec; font-weight: 600; min-height: 40px; }"
+        "QPushButton#sheetAction:disabled { color: #636366; }"));
+    auto* layout = new QVBoxLayout(sheet);
+    layout->setContentsMargins(18, 16, 18, 18);
+    layout->setSpacing(14);
+
+    auto* titleRow = new QHBoxLayout();
+    auto* title = new QLabel(QStringLiteral("Settings"), sheet);
+    title->setObjectName(QStringLiteral("pageTitle"));
+    auto* done = new QPushButton(QStringLiteral("Done"), sheet);
+    done->setObjectName(QStringLiteral("sheetAction"));
+    done->setCursor(Qt::PointingHandCursor);
+    done->setFocusPolicy(Qt::NoFocus);
+    titleRow->addWidget(title);
+    titleRow->addStretch(1);
+    titleRow->addWidget(done);
+    layout->addLayout(titleRow);
+
+    auto section = [sheet](const QString& text) {
+        auto* label = new QLabel(text, sheet);
+        label->setObjectName(QStringLiteral("section"));
+        return label;
+    };
+    auto hairline = [](QWidget* parent) {
+        auto* line = new QWidget(parent);
+        line->setFixedHeight(1);
+        line->setAttribute(Qt::WA_StyledBackground, true);
+        line->setStyleSheet(QStringLiteral("background: rgba(255, 255, 255, 24);"));
+        return line;
+    };
+
+    layout->addWidget(section(QStringLiteral("Password")));
+    auto* securityBox = new QFrame(sheet);
     securityBox->setObjectName(QStringLiteral("settingsGroup"));
-    auto* securityLayout = new QFormLayout(securityBox);
+    securityBox->setAttribute(Qt::WA_StyledBackground, true);
+    auto* securityLayout = new QVBoxLayout(securityBox);
+    securityLayout->setContentsMargins(0, 4, 0, 4);
+    securityLayout->setSpacing(0);
     currentPassword_ = new QLineEdit(securityBox);
     currentPassword_->setEchoMode(QLineEdit::Password);
+    currentPassword_->setPlaceholderText(QStringLiteral("Current password"));
     newPassword_ = new QLineEdit(securityBox);
     newPassword_->setEchoMode(QLineEdit::Password);
+    newPassword_->setPlaceholderText(QStringLiteral("New password"));
     confirmPassword_ = new QLineEdit(securityBox);
     confirmPassword_->setEchoMode(QLineEdit::Password);
+    confirmPassword_->setPlaceholderText(QStringLiteral("Confirm new password"));
     securityProfile_ = new QComboBox(securityBox);
     securityProfile_->addItem(QStringLiteral("Balanced — 256 MiB, 3 iterations"));
     securityProfile_->addItem(QStringLiteral("High security — 512 MiB, 4 iterations"));
     changePasswordButton_ = new QPushButton(QStringLiteral("Change password"), securityBox);
-    securityLayout->addRow(QStringLiteral("Current password"), currentPassword_);
-    securityLayout->addRow(QStringLiteral("New password"), newPassword_);
-    securityLayout->addRow(QStringLiteral("Confirm new password"), confirmPassword_);
-    securityLayout->addRow(QStringLiteral("Argon2id security profile"), securityProfile_);
-    securityLayout->addRow(QString(), changePasswordButton_);
+    changePasswordButton_->setObjectName(QStringLiteral("sheetAction"));
+    changePasswordButton_->setCursor(Qt::PointingHandCursor);
+    securityLayout->addWidget(currentPassword_);
+    securityLayout->addWidget(hairline(securityBox));
+    securityLayout->addWidget(newPassword_);
+    securityLayout->addWidget(hairline(securityBox));
+    securityLayout->addWidget(confirmPassword_);
+    securityLayout->addWidget(hairline(securityBox));
+    securityLayout->addWidget(securityProfile_);
+    securityLayout->addWidget(hairline(securityBox));
+    securityLayout->addWidget(changePasswordButton_);
+    layout->addWidget(securityBox);
 
-    // --- Tags: add, rename, delete. ---
-    auto* tagsBox = new QFrame(this);
+    layout->addWidget(section(QStringLiteral("Tags")));
+    auto* tagsBox = new QFrame(sheet);
     tagsBox->setObjectName(QStringLiteral("settingsGroup"));
+    tagsBox->setAttribute(Qt::WA_StyledBackground, true);
     auto* tagsLayout = new QVBoxLayout(tagsBox);
+    tagsLayout->setContentsMargins(0, 4, 0, 4);
+    tagsLayout->setSpacing(0);
     tagList_ = new QListWidget(tagsBox);
-    tagList_->setSelectionMode(QAbstractItemView::SingleSelection);
-    auto* tagButtons = new QHBoxLayout();
-    addTagButton_ = new QPushButton(QStringLiteral("Add…"), tagsBox);
-    renameTagButton_ = new QPushButton(QStringLiteral("Rename…"), tagsBox);
-    removeTagButton_ = new QPushButton(QStringLiteral("Remove"), tagsBox);
-    tagButtons->addWidget(addTagButton_);
-    tagButtons->addWidget(renameTagButton_);
-    tagButtons->addWidget(removeTagButton_);
-    tagButtons->addStretch(1);
+    tagList_->setObjectName(QStringLiteral("tagList"));
+    tagList_->setSelectionMode(QAbstractItemView::NoSelection);
+    tagList_->setFrameShape(QFrame::NoFrame);
+    tagList_->setFixedHeight(200);
+    auto* addRow = new QHBoxLayout();
+    addRow->setContentsMargins(0, 0, 8, 0);
+    newTagEdit_ = new QLineEdit(tagsBox);
+    newTagEdit_->setPlaceholderText(QStringLiteral("New tag"));
+    addTagButton_ = new QPushButton(QStringLiteral("Add"), tagsBox);
+    addTagButton_->setObjectName(QStringLiteral("sheetAction"));
+    addTagButton_->setCursor(Qt::PointingHandCursor);
+    addRow->addWidget(newTagEdit_, 1);
+    addRow->addWidget(addTagButton_);
     tagsLayout->addWidget(tagList_);
-    tagsLayout->addLayout(tagButtons);
+    tagsLayout->addWidget(hairline(tagsBox));
+    tagsLayout->addLayout(addRow);
+    layout->addWidget(tagsBox);
 
-    // --- Gallery: fill in thumbnails import could not create. ---
-    auto* playbackBox = new QFrame(this);
+    layout->addWidget(section(QStringLiteral("Thumbnails")));
+    auto* playbackBox = new QFrame(sheet);
     playbackBox->setObjectName(QStringLiteral("settingsGroup"));
-    auto* playbackLayout = new QFormLayout(playbackBox);
-    regenerateButton_ = new QPushButton(QStringLiteral("Regenerate"), playbackBox);
+    playbackBox->setAttribute(Qt::WA_StyledBackground, true);
+    auto* playbackLayout = new QVBoxLayout(playbackBox);
+    playbackLayout->setContentsMargins(0, 4, 0, 4);
+    regenerateButton_ = new QPushButton(QStringLiteral("Regenerate missing"), playbackBox);
+    regenerateButton_->setObjectName(QStringLiteral("sheetAction"));
+    regenerateButton_->setCursor(Qt::PointingHandCursor);
     regenerateButton_->setToolTip(QStringLiteral(
         "Build thumbnails only for videos that do not have one yet"));
-    playbackLayout->addRow(QStringLiteral("Missing thumbnails"), regenerateButton_);
-
-    status_ = new QLabel(this);
-    status_->setWordWrap(true);
-    status_->setStyleSheet(QStringLiteral("color: #c74e4e;"));
-
-    layout->addWidget(securityBox);
-    layout->addWidget(tagsBox);
+    playbackLayout->addWidget(regenerateButton_);
     layout->addWidget(playbackBox);
+
+    status_ = new QLabel(sheet);
+    status_->setWordWrap(true);
+    status_->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
     layout->addWidget(status_);
-    layout->addStretch(1);
+
+    outer->addWidget(sheet, 0, Qt::AlignHCenter);
+    outer->addStretch(1);
+
+    connect(done, &QPushButton::clicked, this, &QDialog::reject);
 
     connect(changePasswordButton_, &QPushButton::clicked,
         this, [this] { beginPasswordChange(); });
     connect(addTagButton_, &QPushButton::clicked, this, [this] { addTag(); });
-    connect(renameTagButton_, &QPushButton::clicked,
-        this, [this] { renameSelectedTag(); });
-    connect(removeTagButton_, &QPushButton::clicked,
-        this, [this] { removeSelectedTag(); });
+    connect(newTagEdit_, &QLineEdit::returnPressed, this, [this] { addTag(); });
     connect(regenerateButton_, &QPushButton::clicked,
         this, [this] { beginRegenerateMissing(); });
-    connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
-        this, [this](int) { applyCacheSelection(); });
+    if (cacheCombo_ != nullptr) {
+        connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
+            this, [this](int) { applyCacheSelection(); });
+    }
 
     reloadTags();
+}
+
+void SettingsDialog::paintEvent(QPaintEvent*) {
+    QPainter painter(this);
+    painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+    if (!backdrop_.isNull()) {
+        painter.drawImage(rect(), backdrop_);
+    } else {
+        painter.fillRect(rect(), QColor(0, 0, 0));
+    }
+    painter.fillRect(rect(), QColor(0, 0, 0, 150));
+}
+
+void SettingsDialog::showEvent(QShowEvent* event) {
+    QDialog::showEvent(event);
+    if (QWidget* host = parentWidget()) {
+        const QPoint origin = host->mapToGlobal(QPoint(0, 0));
+        setGeometry(QRect(origin, host->size()));
+        backdrop_ = frost(host->grab().toImage());
+        update();
+    }
+}
+
+void SettingsDialog::mousePressEvent(QMouseEvent* event) {
+    if (childAt(event->pos()) == nullptr) {
+        reject();
+        return;
+    }
+    QDialog::mousePressEvent(event);
 }
 
 void SettingsDialog::setStatus(const QString& message, const bool error) {
     status_->setText(message);
     status_->setStyleSheet(error
-        ? QStringLiteral("color: #c74e4e;")
-        : QStringLiteral("color: #6fae6f;"));
+        ? QStringLiteral("color: #ff6b6b;")
+        : QStringLiteral("color: #3390ec;"));
+}
+
+bool SettingsDialog::eventFilter(QObject* watched, QEvent* event) {
+    if (event->type() == QEvent::MouseButtonDblClick) {
+        const auto id = watched->property("tagId");
+        if (id.isValid()) {
+            for (int i = 0; i < tagList_->count(); ++i) {
+                auto* item = tagList_->item(i);
+                if (item->data(Qt::UserRole) == id) {
+                    tagList_->setCurrentItem(item);
+                    renameSelectedTag();
+                    return true;
+                }
+            }
+        }
+    }
+    return QDialog::eventFilter(watched, event);
 }
 
 void SettingsDialog::reloadTags() {
@@ -121,13 +242,37 @@ void SettingsDialog::reloadTags() {
         return;
     }
     for (const auto& tag : tags.value()) {
-        auto* item = new QListWidgetItem(
-            QStringLiteral("%1  (%2)").arg(QString::fromStdString(tag.name))
-                .arg(tag.video_count),
-            tagList_);
+        const QString name = QString::fromStdString(tag.name);
+        auto* item = new QListWidgetItem(tagList_);
+        item->setText(name);
         item->setData(Qt::UserRole, static_cast<qulonglong>(tag.id));
-        item->setToolTip(QStringLiteral("Videos with this tag: %1")
+        item->setSizeHint(QSize(0, 40));
+        item->setToolTip(QStringLiteral("Double-click to rename. Videos: %1")
             .arg(tag.video_count));
+        auto* row = new QWidget(tagList_);
+        auto* rowLayout = new QHBoxLayout(row);
+        rowLayout->setContentsMargins(8, 0, 4, 0);
+        auto* nameLabel = new QLabel(name, row);
+        nameLabel->setStyleSheet(QStringLiteral("color: #ffffff; font-size: 14px;"));
+        nameLabel->setProperty("tagId", static_cast<qulonglong>(tag.id));
+        nameLabel->installEventFilter(this);
+        auto* countLabel = new QLabel(QString::number(tag.video_count), row);
+        countLabel->setStyleSheet(QStringLiteral("color: #8e8e93; font-size: 13px;"));
+        auto* remove = new QPushButton(QStringLiteral("Remove"), row);
+        remove->setCursor(Qt::PointingHandCursor);
+        remove->setStyleSheet(QStringLiteral(
+            "QPushButton { color: #ff453a; background: transparent; border: none;"
+            " min-height: 28px; padding: 0 8px; }"));
+        remove->setFocusPolicy(Qt::NoFocus);
+        remove->setToolTip(QStringLiteral("Remove tag"));
+        rowLayout->addWidget(nameLabel, 1);
+        rowLayout->addWidget(countLabel);
+        rowLayout->addWidget(remove);
+        tagList_->setItemWidget(item, row);
+        connect(remove, &QPushButton::clicked, this, [this, item] {
+            tagList_->setCurrentItem(item);
+            removeSelectedTag();
+        });
     }
     tagList_->setEnabled(true);
 }
@@ -187,12 +332,8 @@ void SettingsDialog::addTag() {
     if (!vault_ || !vault_->is_unlocked()) {
         return;
     }
-    bool ok = false;
-    const QString name = QInputDialog::getText(
-        this, QStringLiteral("Add tag"),
-        QStringLiteral("Tag name (shared across videos):"),
-        QLineEdit::Normal, QString(), &ok);
-    if (!ok || name.trimmed().isEmpty()) {
+    const QString name = newTagEdit_->text().trimmed();
+    if (name.isEmpty()) {
         return;
     }
     setStatus({});
@@ -200,7 +341,9 @@ void SettingsDialog::addTag() {
     if (!result) {
         setStatus(QString::fromUtf8(
             core::user_message(result.error().code).data()), true);
+        return;
     }
+    newTagEdit_->clear();
     reloadTags();
     emit settingsChanged();
 }
@@ -215,7 +358,7 @@ void SettingsDialog::renameSelectedTag() {
     const QString name = QInputDialog::getText(
         this, QStringLiteral("Rename tag"),
         QStringLiteral("New name:"),
-        QLineEdit::Normal, item->text().section(QLatin1Char(' '), 0, 0), &ok);
+        QLineEdit::Normal, item->text(), &ok);
     if (!ok || name.trimmed().isEmpty()) {
         return;
     }

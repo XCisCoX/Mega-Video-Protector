@@ -12,6 +12,8 @@ import java.nio.ByteBuffer
 import java.nio.ByteOrder
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
+import androidx.compose.foundation.border
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
@@ -26,6 +28,7 @@ import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.statusBarsPadding
 import androidx.compose.foundation.shape.CircleShape
+import androidx.compose.foundation.shape.RoundedCornerShape
 import androidx.compose.foundation.pager.VerticalPager
 import androidx.compose.foundation.pager.rememberPagerState
 import androidx.compose.material3.Text
@@ -302,12 +305,17 @@ fun PlayerScreen(
                     }
                 }
                 if ((shortClip && loopPaused && onThisPage) || (!playing && active)) {
-                    Text(
-                        "▶",
-                        color = Color.White,
-                        fontSize = 42.sp,
-                        modifier = Modifier.align(Alignment.Center),
-                    )
+                    Box(
+                        Modifier
+                            .align(Alignment.Center)
+                            .size(72.dp)
+                            .clip(CircleShape)
+                            .background(Color.Black.copy(alpha = 0.28f))
+                            .border(1.dp, Color.White.copy(alpha = 0.28f), CircleShape),
+                        contentAlignment = Alignment.Center,
+                    ) {
+                        Text("▶", color = Color.White, fontSize = 28.sp)
+                    }
                 }
                 Text(
                     item.name,
@@ -319,19 +327,29 @@ fun PlayerScreen(
                     modifier = Modifier
                         .align(Alignment.BottomStart)
                         .navigationBarsPadding()
-                        .padding(start = 16.dp, end = 16.dp, bottom = 36.dp),
+                        .padding(start = 16.dp, end = 72.dp, bottom = 28.dp)
+                        .clip(RoundedCornerShape(14.dp))
+                        .background(Color.Black.copy(alpha = 0.38f))
+                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
+                        .padding(horizontal = 12.dp, vertical = 7.dp),
                 )
             }
         }
 
-        MvpButton(
-            "←",
-            onClick = onBack,
-            modifier = Modifier
+        Box(
+            Modifier
                 .align(Alignment.TopStart)
                 .statusBarsPadding()
-                .padding(12.dp),
-        )
+                .padding(12.dp)
+                .size(40.dp)
+                .clip(CircleShape)
+                .background(Color.Black.copy(alpha = 0.35f))
+                .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
+                .clickable(onClick = onBack),
+            contentAlignment = Alignment.Center,
+        ) {
+            Text("‹", color = Color.White, fontSize = 28.sp)
+        }
 
         val barDuration = if (loopDuration > 0L) loopDuration else duration
         val barPosition = if (loopDuration > 0L) loopPosition else position

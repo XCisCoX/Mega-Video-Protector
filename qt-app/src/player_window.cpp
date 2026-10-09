@@ -15,6 +15,7 @@ extern "C" {
 #include <QEvent>
 #include <QHBoxLayout>
 #include <QKeyEvent>
+#include <QLinearGradient>
 #include <QMouseEvent>
 #include <QPainter>
 #include <QResizeEvent>
@@ -111,10 +112,45 @@ QPixmap makePlayerIcon(const PlayerIcon kind, const int size, const QColor& colo
     return pixmap;
 }
 
+// Dark glass over the picture: a soft copy of the frame, then a charcoal veil.
+class PlayerGlass final : public QWidget {
+public:
+    PlayerGlass(VideoSurface* surface, const bool top, QWidget* parent)
+        : QWidget(parent), surface_(surface), top_(top) {}
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        const QImage& frame = surface_->frame();
+        if (!frame.isNull() && frame.width() > 0 && frame.height() > 0) {
+            const int strip = std::max(8, frame.height() / 5);
+            const QRect source(0, top_ ? 0 : frame.height() - strip, frame.width(), strip);
+            const QImage small = frame.copy(source).scaled(
+                std::max(16, width() / 8),
+                std::max(8, height() / 4),
+                Qt::IgnoreAspectRatio,
+                Qt::SmoothTransformation);
+            painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+            painter.drawImage(rect(), small);
+        } else {
+            painter.fillRect(rect(), QColor(0, 0, 0));
+        }
+        QLinearGradient shade(0, top_ ? 0 : height(), 0, top_ ? height() : 0);
+        shade.setColorAt(0.0, QColor(6, 6, 8, 220));
+        shade.setColorAt(1.0, QColor(6, 6, 8, 60));
+        painter.fillRect(rect(), shade);
+    }
+
+private:
+    VideoSurface* surface_;
+    bool top_;
+};
+
 const char* kIconButtonStyle =
-    "QPushButton { background: transparent; border: none; border-radius: 9px; }"
-    "QPushButton:hover { background: rgba(255,255,255,26); }"
-    "QPushButton:pressed { background: rgba(255,255,255,42); }";
+    "QPushButton { background: rgba(0,0,0,70); border: 1px solid rgba(255,255,255,40);"
+    " border-radius: 19px; }"
+    "QPushButton:hover { background: rgba(255,255,255,28); }"
+    "QPushButton:pressed { background: rgba(51,144,236,180); }";
 
 // Still-image codecs (FFmpeg demuxes jpg/png/... as single-frame "videos").
 bool is_image_codec(const std::string& codec_name) {
@@ -206,11 +242,7 @@ PlayerWindow::PlayerWindow(
     // Overlay chrome: title bar on top, center play button, bottom controls —
     // all direct children of the surface, so the empty video area keeps its
     // own mouse handling (click-to-seek) while the controls work normally.
-    topOverlay_ = new QWidget(surface_);
-    topOverlay_->setAttribute(Qt::WA_StyledBackground, true);
-    topOverlay_->setStyleSheet(QStringLiteral(
-        "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-        " stop:0 rgba(8,10,14,200), stop:1 rgba(8,10,14,0));"));
+    topOverlay_ = new PlayerGlass(surface_, true, surface_);
     topOverlay_->setFixedHeight(64);
     titleLabel_ = new QLabel(title, topOverlay_);
     titleLabel_->setStyleSheet(QStringLiteral(
@@ -226,18 +258,14 @@ PlayerWindow::PlayerWindow(
     centerPlayButton_->setIcon(makePlayerIcon(PlayerIcon::Play, 36, Qt::white));
     centerPlayButton_->setFocusPolicy(Qt::NoFocus);
     centerPlayButton_->setStyleSheet(QStringLiteral(
-        "QPushButton { border-radius: 36px; background: rgba(0,0,0,150);"
+        "QPushButton { border-radius: 36px; background: rgba(0,0,0,90);"
         " border: 1px solid rgba(255,255,255,70); }"
-        "QPushButton:hover { background: rgba(91,124,250,190); }"));
+        "QPushButton:hover { background: rgba(51,144,236,200); }"));
     connect(centerPlayButton_, &QPushButton::clicked, this, [this] {
         togglePlayPause();
     });
 
-    controlsOverlay_ = new QWidget(surface_);
-    controlsOverlay_->setAttribute(Qt::WA_StyledBackground, true);
-    controlsOverlay_->setStyleSheet(QStringLiteral(
-        "background: qlineargradient(x1:0, y1:0, x2:0, y2:1,"
-        " stop:0 rgba(8,10,14,0), stop:1 rgba(8,10,14,205));"));
+    controlsOverlay_ = new PlayerGlass(surface_, false, surface_);
     auto* controlsLayout = new QVBoxLayout(controlsOverlay_);
     controlsLayout->setContentsMargins(14, 8, 14, 10);
     controlsLayout->setSpacing(4);
@@ -290,12 +318,12 @@ PlayerWindow::PlayerWindow(
     cacheCombo_->setToolTip(QStringLiteral(
         "How much of the video to buffer in memory while streaming"));
     cacheCombo_->setStyleSheet(QStringLiteral(
-        "QComboBox { background: rgba(255,255,255,18); border: none;"
-        " border-radius: 8px; color: rgba(255,255,255,185);"
-        " padding: 4px 8px; min-height: 26px; font-size: 11px; }"
+        "QComboBox { background: rgba(255,255,255,20); border: 1px solid rgba(255,255,255,40);"
+        " border-radius: 14px; color: rgba(255,255,255,220);"
+        " padding: 4px 10px; min-height: 26px; font-size: 11px; }"
         "QComboBox::drop-down { border: none; width: 18px; }"
-        "QComboBox QAbstractItemView { background: #171c25; color: #edf1f6;"
-        " border: 1px solid #2b3444; selection-background-color: #5b7cfa; }"));
+        "QComboBox QAbstractItemView { background: #1c1c1e; color: white;"
+        " border: 1px solid rgba(255,255,255,40); selection-background-color: #3390ec; }"));
 
     fullscreenButton_ = new QPushButton(controlsOverlay_);
     fullscreenButton_->setFixedSize(38, 38);
@@ -326,10 +354,11 @@ PlayerWindow::PlayerWindow(
         button->setCursor(Qt::PointingHandCursor);
         button->setFocusPolicy(Qt::NoFocus);
         button->setStyleSheet(QStringLiteral(
-            "QPushButton { background: rgba(255,255,255,18); border: none;"
-            " border-radius: 8px; color: rgba(255,255,255,220);"
+            "QPushButton { background: rgba(255,255,255,20);"
+            " border: 1px solid rgba(255,255,255,40);"
+            " border-radius: 14px; color: rgba(255,255,255,230);"
             " padding: 4px 12px; min-height: 26px; font-size: 12px; }"
-            "QPushButton:hover { background: rgba(255,255,255,38); }"));
+            "QPushButton:hover { background: rgba(255,255,255,36); }"));
     }
     zoomLabel_->setStyleSheet(QStringLiteral(
         "color: rgba(255,255,255,205); font-size: 12px; min-width: 46px;"));
@@ -359,11 +388,11 @@ PlayerWindow::PlayerWindow(
     volumePopup_->setWindowFlags(Qt::Popup | Qt::FramelessWindowHint);
     volumePopup_->setAttribute(Qt::WA_StyledBackground, true);
     volumePopup_->setStyleSheet(QStringLiteral(
-        "QFrame { background: #171c25; border: 1px solid #2b3444;"
-        " border-radius: 10px; }"
-        "QSlider::groove:horizontal { height: 4px; background: #364154;"
+        "QFrame { background: #1c1c1e; border: 1px solid rgba(255,255,255,28);"
+        " border-radius: 16px; }"
+        "QSlider::groove:horizontal { height: 4px; background: rgba(255,255,255,40);"
         " border-radius: 2px; }"
-        "QSlider::sub-page:horizontal { background: #5b7cfa; border-radius: 2px; }"
+        "QSlider::sub-page:horizontal { background: #3390ec; border-radius: 2px; }"
         "QSlider::handle:horizontal { width: 14px; margin: -5px 0;"
         " border-radius: 7px; background: #ffffff; }"));
     auto* volLayout = new QHBoxLayout(volumePopup_);
@@ -1239,6 +1268,12 @@ void PlayerWindow::tick() {
         if (!image.isNull()) {
             lastFrame_ = image;
             surface_->setFrame(image);
+            if (topOverlay_ != nullptr) {
+                topOverlay_->update();
+            }
+            if (controlsOverlay_ != nullptr) {
+                controlsOverlay_->update();
+            }
         }
     }
 

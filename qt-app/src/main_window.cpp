@@ -1,4 +1,5 @@
 #include "videovault/app/batch_worker.hpp"
+#include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
@@ -7,6 +8,7 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <QAbstractButton>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -18,6 +20,7 @@
 #include <QEvent>
 #include <QFileDialog>
 #include <QFormLayout>
+#include <QFont>
 #include <QFrame>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
@@ -31,7 +34,13 @@
 #include <QListWidget>
 #include <QMenu>
 #include <QMimeData>
+#include <QPainter>
+#include <QPen>
 #include <QPixmap>
+#include <QResizeEvent>
+#include <QShowEvent>
+#include <QStyle>
+#include <QStyledItemDelegate>
 #include <QProgressBar>
 #include <QMessageBox>
 #include <QPushButton>
@@ -44,6 +53,14 @@
 #include <QTreeWidget>
 #include <QVBoxLayout>
 #include <QWidget>
+
+#ifdef Q_OS_WIN
+#define NOMINMAX
+#include <windows.h>
+#include <windowsx.h>
+#include <dwmapi.h>
+#pragma comment(lib, "dwmapi.lib")
+#endif
 
 #include <algorithm>
 #include <atomic>
@@ -113,15 +130,154 @@ QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id
 // roles so it can be rebuilt when the user switches view modes.
 void updateIconItemText(QListWidgetItem* item) {
     const QString name = item->data(Qt::UserRole + 1).toString();
-    const QString tags = item->data(Qt::UserRole + 2).toString();
+    // Icon mode is a picture grid. The name stays in the tooltip, not under the tile.
     if (item->listWidget() != nullptr
-        && item->listWidget()->viewMode() == QListView::IconMode
-        && !tags.isEmpty()) {
-        item->setText(QStringLiteral("%1\n%2").arg(name, tags));
-    } else {
-        item->setText(name);
+        && item->listWidget()->viewMode() == QListView::IconMode) {
+        item->setText(QString());
+        return;
     }
+    item->setText(name);
 }
+
+void layoutInstagramGrid(QListWidget* list) {
+    if (list == nullptr || list->viewMode() != QListView::IconMode) {
+        return;
+    }
+    const int columns = 3;
+    const int width = std::max(columns, list->viewport()->width());
+    const int cell = std::max(48, width / columns);
+    if (list->gridSize() == QSize(cell, cell)) {
+        return;
+    }
+    list->setGridSize(QSize(cell, cell));
+    list->setIconSize(QSize(cell, cell));
+}
+
+// Square cover tiles, a hairline gap, and a small duration on the picture.
+class InstagramDelegate final : public QStyledItemDelegate {
+public:
+    using QStyledItemDelegate::QStyledItemDelegate;
+
+    void paint(QPainter* painter, const QStyleOptionViewItem& option,
+        const QModelIndex& index) const override {
+        const auto* view = qobject_cast<const QListView*>(option.widget);
+        if (view == nullptr || view->viewMode() != QListView::IconMode) {
+            QStyledItemDelegate::paint(painter, option, index);
+            return;
+        }
+        painter->save();
+        painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+        const QRect tile = option.rect.adjusted(1, 1, -2, -2);
+        painter->fillRect(tile, QColor(22, 22, 24));
+        const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
+        if (!source.isNull()) {
+            const QPixmap scaled = source.scaled(
+                tile.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+            const int cropX = std::max(0, (scaled.width() - tile.width()) / 2);
+            const int cropY = std::max(0, (scaled.height() - tile.height()) / 2);
+            painter->drawPixmap(
+                tile, scaled, QRect(cropX, cropY, tile.width(), tile.height()));
+        }
+        const bool selected = option.state.testFlag(QStyle::State_Selected);
+        const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
+        if (hovered && !selected) {
+            painter->fillRect(tile, QColor(255, 255, 255, 28));
+        }
+        if (selected) {
+            painter->fillRect(tile, QColor(0, 0, 0, 70));
+            painter->setPen(QPen(QColor(51, 144, 236), 3));
+            painter->setBrush(Qt::NoBrush);
+            painter->drawRect(tile.adjusted(1, 1, -2, -2));
+        }
+        const QString duration = index.data(Qt::UserRole + 3).toString();
+        if (!duration.isEmpty()) {
+            QFont font = painter->font();
+            font.setPixelSize(12);
+            font.setWeight(QFont::DemiBold);
+            painter->setFont(font);
+            const QRect text = tile.adjusted(8, 0, -8, -6);
+            painter->setPen(QColor(0, 0, 0, 180));
+            painter->drawText(text.translated(0, 1), Qt::AlignLeft | Qt::AlignBottom, duration);
+            painter->setPen(Qt::white);
+            painter->drawText(text, Qt::AlignLeft | Qt::AlignBottom, duration);
+        }
+        painter->restore();
+    }
+
+    QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
+        const auto* view = qobject_cast<const QListView*>(option.widget);
+        if (view != nullptr && view->viewMode() == QListView::IconMode
+            && view->gridSize().isValid()) {
+            return view->gridSize();
+        }
+        return QStyledItemDelegate::sizeHint(option, index);
+    }
+};
+
+class IconGrid final : public QListWidget {
+public:
+    using QListWidget::QListWidget;
+
+protected:
+    void resizeEvent(QResizeEvent* event) override {
+        QListWidget::resizeEvent(event);
+        layoutInstagramGrid(this);
+    }
+};
+
+enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
+
+class CaptionButton final : public QAbstractButton {
+public:
+    explicit CaptionButton(const CaptionGlyph glyph, QWidget* parent = nullptr)
+        : QAbstractButton(parent), glyph_(glyph) {
+        setFixedSize(46, 40);
+        setCursor(Qt::ArrowCursor);
+        setFocusPolicy(Qt::NoFocus);
+    }
+
+    void setGlyph(const CaptionGlyph glyph) {
+        glyph_ = glyph;
+        update();
+    }
+
+protected:
+    void enterEvent(QEvent*) override { update(); }
+    void leaveEvent(QEvent*) override { update(); }
+
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        const bool close = glyph_ == CaptionGlyph::Close;
+        if (underMouse()) {
+            painter.fillRect(rect(), close ? QColor(232, 17, 35) : QColor(255, 255, 255, 28));
+        }
+        painter.setPen(QPen(Qt::white, 1.15, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setBrush(Qt::NoBrush);
+        const QPointF center(width() / 2.0, height() / 2.0);
+        switch (glyph_) {
+        case CaptionGlyph::Minimize:
+            painter.drawLine(QPointF(center.x() - 5, center.y()), QPointF(center.x() + 5, center.y()));
+            break;
+        case CaptionGlyph::Maximize:
+            painter.drawRoundedRect(QRectF(center.x() - 5, center.y() - 5, 10, 10), 1.5, 1.5);
+            break;
+        case CaptionGlyph::Restore: {
+            painter.drawRoundedRect(QRectF(center.x() - 5, center.y() - 2, 8, 8), 1.2, 1.2);
+            painter.drawLine(QPointF(center.x() - 2, center.y() - 4), QPointF(center.x() + 5, center.y() - 4));
+            painter.drawLine(QPointF(center.x() + 5, center.y() - 4), QPointF(center.x() + 5, center.y() + 3));
+            break;
+        }
+        case CaptionGlyph::Close:
+            painter.drawLine(QPointF(center.x() - 5, center.y() - 5), QPointF(center.x() + 5, center.y() + 5));
+            painter.drawLine(QPointF(center.x() + 5, center.y() - 5), QPointF(center.x() - 5, center.y() + 5));
+            break;
+        }
+    }
+
+private:
+    CaptionGlyph glyph_;
+};
 
 QLabel* heading(const QString& text, QWidget* parent) {
     auto* label = new QLabel(text, parent);
@@ -180,6 +336,11 @@ struct VaultOperationResult {
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), autoLockTimer_(new QTimer(this)) {
     setWindowTitle(QStringLiteral("Mega Video Protect"));
+#ifdef Q_OS_WIN
+    setWindowFlags(Qt::Window | Qt::FramelessWindowHint
+        | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint
+        | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
+#endif
     resize(1020, 700);
     setMinimumSize(780, 520);
     setAcceptDrops(true); // drag & drop video import
@@ -280,15 +441,136 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
     return QMainWindow::eventFilter(watched, event);
 }
 
+void MainWindow::changeEvent(QEvent* event) {
+    if (event->type() == QEvent::WindowStateChange && captionMax_ != nullptr) {
+        static_cast<CaptionButton*>(captionMax_)->setGlyph(
+            isMaximized() ? CaptionGlyph::Restore : CaptionGlyph::Maximize);
+    }
+    QMainWindow::changeEvent(event);
+}
+
+void MainWindow::showEvent(QShowEvent* event) {
+    QMainWindow::showEvent(event);
+    layoutInstagramGrid(iconList_);
+#ifdef Q_OS_WIN
+    if (!frameReady_) {
+        frameReady_ = true;
+        HWND hwnd = reinterpret_cast<HWND>(winId());
+        LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
+        style |= WS_THICKFRAME | WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU;
+        SetWindowLongPtr(hwnd, GWL_STYLE, style);
+        const MARGINS shadow{1, 1, 1, 1};
+        DwmExtendFrameIntoClientArea(hwnd, &shadow);
+        SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
+            SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
+    }
+#endif
+}
+
+bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, long* result) {
+#ifdef Q_OS_WIN
+    if (eventType == "windows_generic_MSG") {
+        auto* msg = static_cast<MSG*>(message);
+        if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
+            if (isMaximized()) {
+                auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
+                HMONITOR monitor = MonitorFromWindow(msg->hwnd, MONITOR_DEFAULTTONEAREST);
+                MONITORINFO info{};
+                info.cbSize = sizeof(MONITORINFO);
+                if (GetMonitorInfo(monitor, &info)) {
+                    params->rgrc[0] = info.rcWork;
+                }
+            }
+            *result = 0;
+            return true;
+        }
+        if (msg->message == WM_NCHITTEST) {
+            const QPoint pos = mapFromGlobal(QPoint(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)));
+            constexpr int border = 6;
+            if (!isMaximized()) {
+                const bool left = pos.x() < border;
+                const bool right = pos.x() >= width() - border;
+                const bool top = pos.y() < border;
+                const bool bottom = pos.y() >= height() - border;
+                if (top && left) { *result = HTTOPLEFT; return true; }
+                if (top && right) { *result = HTTOPRIGHT; return true; }
+                if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
+                if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
+                if (left) { *result = HTLEFT; return true; }
+                if (right) { *result = HTRIGHT; return true; }
+                if (top) { *result = HTTOP; return true; }
+                if (bottom) { *result = HTBOTTOM; return true; }
+            }
+            if (captionBar_ != nullptr && captionBar_->geometry().contains(pos)) {
+                QWidget* child = captionBar_->childAt(captionBar_->mapFrom(this, pos));
+                *result = qobject_cast<QAbstractButton*>(child) != nullptr ? HTCLIENT : HTCAPTION;
+                return true;
+            }
+        }
+        if (msg->message == WM_GETMINMAXINFO) {
+            auto* info = reinterpret_cast<MINMAXINFO*>(msg->lParam);
+            info->ptMinTrackSize.x = minimumWidth();
+            info->ptMinTrackSize.y = minimumHeight();
+            return false;
+        }
+    }
+#endif
+    return QMainWindow::nativeEvent(eventType, message, result);
+}
+
 void MainWindow::buildInterface() {
-    pages_ = new QStackedWidget(this);
+    auto* shell = new QWidget(this);
+    auto* shellLayout = new QVBoxLayout(shell);
+    shellLayout->setContentsMargins(0, 0, 0, 0);
+    shellLayout->setSpacing(0);
+
+#ifdef Q_OS_WIN
+    captionBar_ = new QWidget(shell);
+    captionBar_->setFixedHeight(40);
+    captionBar_->setObjectName(QStringLiteral("captionBar"));
+    captionBar_->setAttribute(Qt::WA_StyledBackground, true);
+    captionBar_->setStyleSheet(QStringLiteral(
+        "QWidget#captionBar { background: #000000; border-bottom: 1px solid rgba(255, 255, 255, 22); }"
+        "QLabel#captionTitle { color: #ffffff; font-size: 13px; font-weight: 600; }"));
+    auto* captionLayout = new QHBoxLayout(captionBar_);
+    captionLayout->setContentsMargins(12, 0, 0, 0);
+    captionLayout->setSpacing(8);
+    auto* mark = new QLabel(captionBar_);
+    mark->setPixmap(QIcon(QStringLiteral(":/icons/app.png")).pixmap(16, 16));
+    mark->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    auto* captionTitle = new QLabel(QStringLiteral("Mega Video Protect"), captionBar_);
+    captionTitle->setObjectName(QStringLiteral("captionTitle"));
+    captionTitle->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    captionLayout->addWidget(mark);
+    captionLayout->addWidget(captionTitle);
+    captionLayout->addStretch(1);
+    auto* minimize = new CaptionButton(CaptionGlyph::Minimize, captionBar_);
+    captionMax_ = new CaptionButton(CaptionGlyph::Maximize, captionBar_);
+    auto* closeButton = new CaptionButton(CaptionGlyph::Close, captionBar_);
+    captionLayout->addWidget(minimize);
+    captionLayout->addWidget(captionMax_);
+    captionLayout->addWidget(closeButton);
+    connect(minimize, &QAbstractButton::clicked, this, [this] { showMinimized(); });
+    connect(captionMax_, &QAbstractButton::clicked, this, [this] {
+        if (isMaximized()) {
+            showNormal();
+        } else {
+            showMaximized();
+        }
+    });
+    connect(closeButton, &QAbstractButton::clicked, this, &QWidget::close);
+    shellLayout->addWidget(captionBar_);
+#endif
+
+    pages_ = new QStackedWidget(shell);
     setupPage_ = buildSetupPage();
     loginPage_ = buildLoginPage();
     unlockedPage_ = buildUnlockedPage();
     pages_->addWidget(setupPage_);
     pages_->addWidget(loginPage_);
     pages_->addWidget(unlockedPage_);
-    setCentralWidget(pages_);
+    shellLayout->addWidget(pages_, 1);
+    setCentralWidget(shell);
 }
 
 QWidget* MainWindow::buildSetupPage() {
@@ -401,15 +683,16 @@ QWidget* MainWindow::buildUnlockedPage() {
     layout->setContentsMargins(0, 0, 0, 0);
     layout->setSpacing(0);
 
-    // Slim explorer-style command bar.
-    auto* toolbar = new QWidget(page);
+    // Dark frosted command bar. It blurs the top of the gallery under it.
+    libraryTop_ = new FrostedBar(page);
+    auto* toolbar = libraryTop_;
     auto* toolbarLayout = new QHBoxLayout(toolbar);
     toolbarLayout->setContentsMargins(12, 8, 12, 8);
     toolbarLayout->setSpacing(8);
 
     viewModeCombo_ = new QComboBox(toolbar);
     viewModeCombo_->addItem(QStringLiteral("Details"));
-    viewModeCombo_->addItem(QStringLiteral("Large icons"));
+    viewModeCombo_->addItem(QStringLiteral("Icons"));
     viewModeCombo_->addItem(QStringLiteral("List"));
     tagFilterCombo_ = new QComboBox(toolbar);
     tagFilterCombo_->setMinimumWidth(150);
@@ -417,22 +700,22 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setPlaceholderText(QStringLiteral("Search tags or names…"));
     searchEdit_->setClearButtonEnabled(true);
     searchEdit_->setMinimumWidth(220);
-    importButton_ = new QPushButton(QStringLiteral("Import video…"), toolbar);
+    importButton_ = new QPushButton(QStringLiteral("Import"), toolbar);
     importButton_->setProperty("primary", true);
-    importFolderButton_ = new QPushButton(QStringLiteral("Import folder…"), toolbar);
+    importButton_->setToolTip(QStringLiteral("Import a video or picture"));
+    importFolderButton_ = new QPushButton(QStringLiteral("Folder"), toolbar);
     importFolderButton_->setToolTip(QStringLiteral(
         "Import every video file from a folder (and drop files here to import)"));
     shareButton_ = new QPushButton(QStringLiteral("Share"), toolbar);
     shareButton_->setToolTip(QStringLiteral(
         "Share this vault on Wi-Fi over an encrypted connection. The phone must enter the vault password. "
         "Locking this PC does not stop sharing."));
-    settingsButton_ = new QPushButton(QStringLiteral("Settings…"), toolbar);
+    settingsButton_ = new QPushButton(QStringLiteral("Settings"), toolbar);
     settingsButton_->setToolTip(QStringLiteral(
         "Change the password, manage tags, and adjust player settings"));
     auto* lockButton = new QPushButton(QStringLiteral("Lock"), toolbar);
     lockButton->setToolTip(QStringLiteral(
         "Lock this PC. A phone that already entered the password keeps access until you stop sharing."));
-    lockButton->setFlat(true);
 
     toolbarLayout->addWidget(viewModeCombo_);
     toolbarLayout->addWidget(tagFilterCombo_);
@@ -464,13 +747,12 @@ QWidget* MainWindow::buildUnlockedPage() {
         SIGNAL(sectionClicked(int)),
         this,
         SLOT(sortTree(int)));
-    iconList_ = new QListWidget(page);
+    iconList_ = new IconGrid(page);
     iconList_->setObjectName(QStringLiteral("gallery"));
+    iconList_->setItemDelegate(new InstagramDelegate(iconList_));
     iconList_->setViewMode(QListView::IconMode);
-    iconList_->setIconSize(QSize(128, 128));
-    iconList_->setGridSize(QSize(172, 224));
-    iconList_->setSpacing(8);
-    iconList_->setWordWrap(true);
+    iconList_->setSpacing(0);
+    iconList_->setWordWrap(false);
     iconList_->setResizeMode(QListView::Adjust);
     iconList_->setMovement(QListView::Static);
     iconList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
@@ -482,16 +764,17 @@ QWidget* MainWindow::buildUnlockedPage() {
     galleryStack_->addWidget(iconList_);
     layout->addWidget(galleryStack_, 1);
 
-    // Status bar like Explorer's.
-    auto* statusBar = new QWidget(page);
+    // Path and counts sit on a dark blur of the bottom of the gallery.
+    libraryBottom_ = new FrostedBar(page);
+    auto* statusBar = libraryBottom_;
     auto* statusLayout = new QHBoxLayout(statusBar);
     statusLayout->setContentsMargins(12, 4, 12, 4);
     statusLayout->setSpacing(12);
     unlockedLocation_ = new QLabel(statusBar);
     unlockedLocation_->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    unlockedLocation_->setStyleSheet(QStringLiteral("color: #666666;"));
+    unlockedLocation_->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 180);"));
     statusCountLabel_ = new QLabel(statusBar);
-    statusCountLabel_->setStyleSheet(QStringLiteral("color: #666666;"));
+    statusCountLabel_->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 180);"));
     progressBar_ = new QProgressBar(statusBar);
     progressBar_->setFixedWidth(200);
     progressBar_->setTextVisible(true);
@@ -545,7 +828,17 @@ QWidget* MainWindow::buildUnlockedPage() {
     const int saved_view = settings.value(QStringLiteral("gallery/viewMode"), 1).toInt();
     viewModeCombo_->setCurrentIndex(saved_view);
     setViewMode(saved_view);
+    syncLibraryGlass();
     return page;
+}
+
+void MainWindow::syncLibraryGlass() {
+    if (libraryTop_ == nullptr || libraryBottom_ == nullptr || galleryStack_ == nullptr) {
+        return;
+    }
+    auto* area = qobject_cast<QAbstractScrollArea*>(galleryStack_->currentWidget());
+    libraryTop_->follow(area, FrostedBar::Band::Top);
+    libraryBottom_->follow(area, FrostedBar::Band::Bottom);
 }
 
 void MainWindow::setViewMode(const int index) {
@@ -553,15 +846,18 @@ void MainWindow::setViewMode(const int index) {
     case 0: // Details
         galleryStack_->setCurrentWidget(detailsTree_);
         break;
-    case 1: // Large icons
+    case 1: // Icons: three square columns, picture only.
         iconList_->setViewMode(QListView::IconMode);
-        iconList_->setIconSize(QSize(128, 128));
-        iconList_->setGridSize(QSize(172, 224));
+        iconList_->setSpacing(0);
+        iconList_->setWordWrap(false);
         galleryStack_->setCurrentWidget(iconList_);
+        layoutInstagramGrid(iconList_);
         break;
     default: // List
         iconList_->setViewMode(QListView::ListMode);
         iconList_->setIconSize(QSize(32, 32));
+        iconList_->setGridSize(QSize());
+        iconList_->setSpacing(2);
         galleryStack_->setCurrentWidget(iconList_);
         break;
     }
@@ -574,6 +870,7 @@ void MainWindow::setViewMode(const int index) {
     // switch (Qt IconMode keeps the old scroll offset and item layout).
     iconList_->scrollToTop();
     iconList_->doItemsLayout();
+    syncLibraryGlass();
     QSettings settings;
     settings.setValue(QStringLiteral("gallery/viewMode"), index);
 }
@@ -1292,8 +1589,10 @@ void MainWindow::refreshGallery() {
                     if (pixmap.loadFromData(outcome.value().bytes.data(),
                             static_cast<int>(outcome.value().bytes.size()))) {
                         if (iconItem != nullptr) {
+                            iconItem->setData(Qt::UserRole + 4, pixmap.scaled(
+                                720, 720, Qt::KeepAspectRatio, Qt::SmoothTransformation));
                             iconItem->setIcon(QIcon(pixmap.scaled(
-                                128, 128, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
+                                32, 32, Qt::KeepAspectRatio, Qt::SmoothTransformation)));
                         }
                         if (treeItem != nullptr) {
                             treeItem->setIcon(0, QIcon(pixmap.scaled(
@@ -1324,17 +1623,23 @@ void MainWindow::refreshGallery() {
                     if (!outcome) {
                         return;
                     }
+                    const core::MediaInfo& info = outcome.value();
+                    const std::int64_t duration = info.duration_ms;
+                    const QString durationText = QStringLiteral("%1:%2")
+                        .arg(duration / 60000)
+                        .arg((duration / 1000) % 60, 2, 10, QLatin1Char('0'));
+                    if (auto* iconItem = findListItemById(iconList_, video_id)) {
+                        if (duration > 500) {
+                            iconItem->setData(Qt::UserRole + 3, durationText);
+                        }
+                    }
                     auto* treeItem = findTreeItemById(detailsTree_, video_id);
                     if (treeItem == nullptr) {
                         // Row was cleared out by a newer refresh (e.g. a search
                         // keystroke) before the metadata landed.
                         return;
                     }
-                    const core::MediaInfo& info = outcome.value();
-                    const std::int64_t duration = info.duration_ms;
-                    treeItem->setText(2, QStringLiteral("%1:%2")
-                        .arg(duration / 60000)
-                        .arg((duration / 1000) % 60, 2, 10, QLatin1Char('0')));
+                    treeItem->setText(2, durationText);
                     treeItem->setText(3, QStringLiteral("%1 × %2")
                         .arg(info.width).arg(info.height));
                     treeItem->setText(4, QString::fromStdString(info.codec_name));
@@ -1352,6 +1657,7 @@ void MainWindow::refreshGallery() {
         statusCountLabel_->setText(QStringLiteral("%1 videos · %2 MB")
             .arg(visible.size())
             .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
+        syncLibraryGlass();
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([vault] {

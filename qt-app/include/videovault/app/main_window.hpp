@@ -7,8 +7,10 @@
 #include <memory>
 #include <vector>
 
+class QAbstractButton;
 class QComboBox;
 class QDragEnterEvent;
+class QShowEvent;
 class QDropEvent;
 class QLabel;
 class QLineEdit;
@@ -49,6 +51,7 @@ struct TagEditorData {
 };
 
 class BatchWorker;
+class FrostedBar;
 class ShareServer;
 
 class MainWindow final : public QMainWindow {
@@ -60,6 +63,9 @@ protected:
     bool eventFilter(QObject* watched, QEvent* event) override;
     void dragEnterEvent(QDragEnterEvent* event) override;
     void dropEvent(QDropEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
 
 private:
     void buildInterface();
@@ -88,6 +94,7 @@ private:
     std::int64_t selectedVideoId() const;
     std::vector<std::int64_t> selectedVideoIds() const;
     void setViewMode(int index);
+    void syncLibraryGlass();
     void refreshTagFilter();
     void beginEditTags(const std::vector<std::int64_t>& video_ids);
     void finishEditTags();
@@ -101,6 +108,9 @@ private:
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
 
+    QWidget* captionBar_{nullptr};
+    QAbstractButton* captionMax_{nullptr};
+    bool frameReady_{false};
     QStackedWidget* pages_{nullptr};
     QWidget* setupPage_{nullptr};
     QWidget* loginPage_{nullptr};
@@ -133,6 +143,8 @@ private:
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
     QLabel* statusCountLabel_{nullptr};
+    FrostedBar* libraryTop_{nullptr};
+    FrostedBar* libraryBottom_{nullptr};
     std::int64_t tagFilterId_{-1};
     QString tagFilterName_;
     QString searchText_;
