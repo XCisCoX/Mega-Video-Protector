@@ -1,9 +1,6 @@
 name: Beta Build
-prerelease: true
-# Two ways to create a release:
-#   1. Manual:  Actions -> "Release" -> "Run workflow" -> optional version
-#      (e.g. 0.4.0; empty = auto vYYYY.MM.DD.HHMM). Creates the tag itself.
-#   2. Tag push: git tag v0.4.0 && git push origin v0.4.0  (builds automatically).
+# Manual prerelease only. Tag pushes are published by release.yml, so this
+# workflow must not also run on v* or the two jobs fight over the same tag.
 on:
   workflow_dispatch:
     inputs:
@@ -11,9 +8,6 @@ on:
         description: 'Version to Beta (e.g. 0.4.0). Empty = auto (vYYYY.MM.DD.HHMM).'
         required: false
         default: ''
-  push:
-    tags:
-      - 'v*'
 
 permissions:
   contents: write
@@ -181,16 +175,9 @@ jobs:
 
       - name: Package application
         run: |
-          bin="out/build/linux-release/qt-app/MegaVideoProtect"
-          if [ ! -x "$bin" ]; then echo "Release binary not found: $bin"; exit 1; fi
-          staging="$RUNNER_TEMP/package"
-          mkdir -p "$staging"
-          cp "$bin" "$staging/"
-          # The binary links distro Qt/FFmpeg/sqlcipher/argon2/libsodium;
-          # runtime requirements are documented in the README (qtmultimedia5
-          # plugins + gstreamer for audio). An AppImage bundle can be added
-          # in a later phase.
-          tar -C "$staging" -czf "$RUNNER_TEMP/MegaVideoProtect-linux-x64.tar.gz" .
+          bash scripts/package-linux-release.sh \
+            out/build/linux-release/qt-app/MegaVideoProtect \
+            "$RUNNER_TEMP/MegaVideoProtect-linux-x64.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
@@ -198,8 +185,11 @@ jobs:
           name: MegaVideoProtect-linux-x64
           path: ${{ runner.temp }}/MegaVideoProtect-linux-x64.tar.gz
 
+  build-android:
+    uses: ./.github/workflows/android-build.yml
+
   release:
-    needs: [build-windows, build-linux]
+    needs: [build-windows, build-linux, build-android]
     runs-on: ubuntu-latest
     timeout-minutes: 15
     steps:
@@ -223,25 +213,31 @@ jobs:
           path: ${{ runner.temp }}/artifacts
           merge-multiple: true
 
+      - name: Check release files
+        shell: bash
+        run: |
+          set -euo pipefail
+          dir="${{ runner.temp }}/artifacts"
+          ls -la "$dir"
+          test -f "$dir/MegaVideoProtect-windows-x64.zip"
+          test -f "$dir/MegaVideoProtect-linux-x64.tar.gz"
+          test -f "$dir/app-debug.apk"
+          mv "$dir/app-debug.apk" "$dir/MegaVideoProtect-android-arm64.apk"
+
       - name: Create GitHub Beta
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
           name: Mega Video Protect ${{ steps.version.outputs.tag }}
+          prerelease: true
+          fail_on_unmatched_files: true
           body: |
-            Automated Windows x64 + Linux x64 builds (Release).
+            Prerelease. Windows, Linux, and Android downloads.
 
-            What's inside:
-            - Full vault core: Argon2id, SQLCipher-encrypted database, domain-separated subkeys, authenticated .vvp package format
-            - Explorer-style gallery: Details / Large icons / List, dark theme, thumbnails at import
-            - Tags: multi-tag per video, tag search + filter, tag editor
-            - In-memory player: streaming authenticated reader, read-ahead cache (4-128 MB), volume/mute, fullscreen, keyboard shortcuts
-            - All 7 test suites pass on both platforms (Smoke, Gallery, Admin, Reader, Media, Playback, Tags)
-
-            Windows: extract the zip anywhere and launch MegaVideoProtect.exe.
-            Linux: extract the tarball and run ./MegaVideoProtect (requires the
-            distro packages listed in the README: Qt 5 Multimedia + GStreamer
-            plugins for audio, FFmpeg, SQLCipher, Argon2, libsodium).
+            - **Windows x64:** unzip and run `MegaVideoProtect.exe`.
+            - **Linux x64:** extract and run `./MegaVideoProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer.
+            - **Android (arm64):** install `MegaVideoProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer.
           files: |
             ${{ runner.temp }}/artifacts/MegaVideoProtect-windows-x64.zip
             ${{ runner.temp }}/artifacts/MegaVideoProtect-linux-x64.tar.gz
+            ${{ runner.temp }}/artifacts/MegaVideoProtect-android-arm64.apk
