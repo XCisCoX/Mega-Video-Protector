@@ -26,7 +26,7 @@
 [![Status](https://img.shields.io/badge/Status-Active-brightgreen?style=flat-square)]() &nbsp;
 [![PRs](https://img.shields.io/badge/PRs-welcome-brightgreen?style=flat-square)]()
 
-**[Features](#features)** · **[Screenshots](#screenshots)** · **[Security model](#security-model)** · **[Build & run](#build--run)** · **[Android](#android)** · **[Project layout](#project-layout)**
+**[Features](#features)** · **[Screenshots](#screenshots)** · **[Downloads](#downloads)** · **[Tests](#tests)** · **[Security model](#security-model)** · **[Build & run](#build--run)**
 
 </div>
 
@@ -45,14 +45,38 @@ Mega Video Protect is a video organizer that treats privacy as the default. Ever
 
 ## Screenshots
 
+Taken from the Windows and Android apps after importing the test patterns (SMPTE bars, classic test card, RGB test, `testsrc2`, and a mandelbrot sweep) plus a PNG test card. Nothing in these pictures is decrypted to disk.
+
+### Windows
+
 | | |
 |---|---|
-| **Create a vault** — choose a location, password, and security profile. | **Unlock** — the last vault location is remembered. |
-| ![Setup](docs/screenshots/01-setup.png) | ![Login](docs/screenshots/02-login.png) |
-| **Details view** — name, size, duration, resolution, codec, tags. | **Large icons** — thumbnail grid with live tag filter and search. |
-| ![Details](docs/screenshots/03-gallery-details.png) | ![Icons](docs/screenshots/04-gallery-icons.png) |
-| **Settings** — cache budget and playback preferences. | **In-memory player** — seek bar, volume, fullscreen, keyboard shortcuts. |
-|![Settings](docs/screenshots/05-settings.png) | ![Player](docs/screenshots/06-player.png) | 
+| **Icons** — thumbnail grid, search, and sort. | **List** — name, size, and cover. |
+| ![Windows icons](docs/screenshots/windows-icons.png) | ![Windows list](docs/screenshots/windows-list.png) |
+| **Details** — size, duration, resolution, codec, tags, imported time. | **Player** — in-memory playback of `Test Pattern.mp4`, with previous/next, seek, volume, and fullscreen. |
+| ![Windows details](docs/screenshots/windows-details.png) | ![Windows player](docs/screenshots/windows-player.png) |
+
+### Android
+
+The phone library uses the same three views. Swipe changes clips; the top bar shows the file name and fullscreen.
+
+<p align="center">
+  <img src="docs/screenshots/android-icons.png" alt="Android icons" width="240" />
+  <img src="docs/screenshots/android-list.png" alt="Android list" width="240" />
+  <img src="docs/screenshots/android-player.png" alt="Android player" width="240" />
+</p>
+
+## Downloads
+
+Each [GitHub Release](https://github.com/XCisCoX/Mega-Video-Protector/releases) has three files:
+
+| File | How to run it |
+|---|---|
+| `MegaVideoProtect-windows-x64.zip` | Unzip and run `MegaVideoProtect.exe`. |
+| `MegaVideoProtect-linux-x64.tar.gz` | Extract and run `./MegaVideoProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). |
+| `MegaVideoProtect-android-arm64.apk` | Install on an arm64 phone running Android 8 or newer. |
+
+Create another release from Actions → **Release** → Run workflow, or push a tag such as `v0.4.0`. The Android package is debug-signed so it can be installed directly. If a later release is signed with a different debug key, uninstall the old one before installing the new APK. 
 
 ## Security model
 
@@ -68,7 +92,7 @@ Mega Video Protect is a video organizer that treats privacy as the default. Ever
 - **Linux x64** — validated on Ubuntu 24.04 (GCC 13, Qt 5.15, distro FFmpeg 6.1 / SQLCipher / Argon2 / libsodium).
 - **Windows x64** — MSVC 2022 + Qt 5.12.12 + pinned vcpkg dependencies.
 - **Android (arm64-v8a)** — native Kotlin/Jetpack Compose app reusing the same C++ core via JNI; built in a pinned NDK container and auto-built in CI.
-- One core; platform-specific code is confined to atomic file I/O (`_WIN32` vs POSIX), dependency discovery (vcpkg vs pkg-config), and the Android JNI bridge. CI builds and tests all platforms on every release.
+- One core; platform-specific code is confined to atomic file I/O (`_WIN32` vs POSIX), dependency discovery (vcpkg vs pkg-config), and the Android JNI bridge. The Release workflow builds all three and runs the test suites on Windows and Linux before it publishes.
 
 ## Build & run
 
@@ -127,7 +151,22 @@ CI builds the same APK on every push (`.github/workflows/android-build.yml`).
 
 ### Tests
 
-Seven focused suites (Smoke, Gallery, Admin, Reader, Media, Playback, Tags) cover vault creation/opening, wrong-password and tamper detection, import/export round-trips, password re-keying, streaming reads, thumbnails, real (headless) playback, and tag behavior.
+`ctest` runs seven headless suites. Windows and Linux release builds run the same list before a release is published.
+
+| Suite | What it checks |
+|---|---|
+| `VideoVaultCore.Smoke` | Create and open a vault. A wrong password is rejected. |
+| `VideoVaultCore.Gallery` | Import, list, and export round-trip. |
+| `VideoVaultCore.Admin` | Password change re-keys the vault. Removal deletes the package. |
+| `VideoVaultCore.Reader` | Streaming reads, seek, and tamper detection on a `.vvp` package. |
+| `VideoVaultCore.Media` | Probe, thumbnail after import, and thumbnail survival across a password change. |
+| `VideoVault.Playback` | Headless decode through the encrypted reader: duration, frames, seek, and audio. No temp file. |
+| `VideoVaultCore.Tags` | Add, filter, rename, and remove tags. |
+
+```text
+ctest --preset linux-debug --output-on-failure
+ctest --preset vs2022-x64-debug
+```
 
 ## Project layout
 
@@ -141,7 +180,7 @@ scripts/     android cross-build (build-android-core.sh), Windows FFmpeg
              import-library regeneration
 third_party/ vcpkg overlay ports + release-only CI triplet (Windows builds)
 docs/        ANDROID-BUILD.md, screenshots, logo assets
-.github/     Release CI (Windows x64 + Linux x64) + Android APK workflow
+.github/     Release workflow (Windows zip, Linux tarball, Android APK)
 ```
 
 ## Tech stack
