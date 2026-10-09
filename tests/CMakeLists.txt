@@ -63,6 +63,8 @@ set_target_properties(VideoVaultCoreMediaTests PROPERTIES FOLDER "Tests")
 mvp_copy_runtime_dlls(VideoVaultCoreMediaTests)
 
 add_test(NAME VideoVaultCore.Media COMMAND VideoVaultCoreMediaTests)
+set_tests_properties(VideoVaultCore.Media PROPERTIES
+    WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 
 # The playback test target is defined in qt-app/ (it needs Qt + FFmpeg), but
 # ctest registration must happen after enable_testing() at the top level.
@@ -70,6 +72,8 @@ add_test(NAME VideoVaultCore.Media COMMAND VideoVaultCoreMediaTests)
 # does not exist there.
 if(TARGET VideoVaultPlaybackTests)
     add_test(NAME VideoVault.Playback COMMAND $<TARGET_FILE:VideoVaultPlaybackTests>)
+    set_tests_properties(VideoVault.Playback PROPERTIES
+        WORKING_DIRECTORY "${CMAKE_SOURCE_DIR}")
 endif()
 
 add_executable(VideoVaultCoreTagTests

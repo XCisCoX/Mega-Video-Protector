@@ -58,6 +58,31 @@ int fail(const char* message) {
     return EXIT_FAILURE;
 }
 
+// ctest starts in the build tree, not the repo. Walk parents so docs/ and
+// tests/fixtures resolve the same way on Windows and Linux CI.
+std::filesystem::path repoPath(const std::filesystem::path& relative) {
+    std::error_code error;
+    auto dir = std::filesystem::current_path(error);
+    if (error) {
+        return {};
+    }
+    for (int i = 0; i < 8; ++i) {
+        const auto candidate = dir / relative;
+        if (std::filesystem::exists(candidate, error)) {
+            return candidate;
+        }
+        if (!dir.has_parent_path()) {
+            break;
+        }
+        const auto parent = dir.parent_path();
+        if (parent == dir) {
+            break;
+        }
+        dir = parent;
+    }
+    return {};
+}
+
 videovault::core::Argon2Parameters testParameters() {
     videovault::core::Argon2Parameters parameters;
     parameters.memory_kib = 8U * 1024U;
@@ -850,10 +875,14 @@ int main() {
 
         const std::filesystem::path png_samples[] = {
             std::filesystem::path("docs") / "MVP-logo.png",
-            std::filesystem::path("docs") / "screenshots" / "01-setup.png",
-            std::filesystem::path("docs") / "screenshots" / "06-player.png",
+            std::filesystem::path("docs") / "MVP-logo-banner.png",
         };
-        for (const auto& sample : png_samples) {
+        for (const auto& relative : png_samples) {
+            const auto sample = repoPath(relative);
+            if (sample.empty()) {
+                std::fprintf(stderr, "Missing repo PNG %ls\n", relative.c_str());
+                return fail("A real PNG from the repo must be present.");
+            }
             const auto sample_id = photo_opened->import_file(sample);
             if (!sample_id) {
                 std::fprintf(stderr, "Import failed for %ls\n", sample.c_str());

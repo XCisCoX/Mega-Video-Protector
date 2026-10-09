@@ -48,6 +48,31 @@ int fail(const char* message) {
     return EXIT_FAILURE;
 }
 
+// ctest starts in the build tree (out/build/<preset>/tests), not the repo.
+// Walk parents until the repo-relative file is found.
+std::filesystem::path repoPath(const std::filesystem::path& relative) {
+    std::error_code error;
+    auto dir = std::filesystem::current_path(error);
+    if (error) {
+        return {};
+    }
+    for (int i = 0; i < 8; ++i) {
+        const auto candidate = dir / relative;
+        if (std::filesystem::exists(candidate, error)) {
+            return candidate;
+        }
+        if (!dir.has_parent_path()) {
+            break;
+        }
+        const auto parent = dir.parent_path();
+        if (parent == dir) {
+            break;
+        }
+        dir = parent;
+    }
+    return {};
+}
+
 videovault::core::Argon2Parameters testParameters() {
     videovault::core::Argon2Parameters parameters;
     parameters.memory_kib = 8U * 1024U;
@@ -494,16 +519,11 @@ int main() {
 
     // An H.264 clip whose sync-sample table does not flag the IDR. The
     // keyframe-only thumbnail walk used to drop every packet and import
-    // stored no JPEG. The fixture is tests/fixtures/h264-unmarked-key.mp4;
-    // ctest's working directory is the tests build dir, three levels down.
+    // stored no JPEG. The fixture is tests/fixtures/h264-unmarked-key.mp4.
     {
-        const std::filesystem::path relative =
-            std::filesystem::path(L"tests") / L"fixtures" / L"h264-unmarked-key.mp4";
-        std::filesystem::path sample = relative;
-        if (!std::filesystem::exists(sample)) {
-            sample = std::filesystem::path(L"..") / L".." / L".." / relative;
-        }
-        if (!std::filesystem::exists(sample)) {
+        const auto sample = repoPath(
+            std::filesystem::path("tests") / "fixtures" / "h264-unmarked-key.mp4");
+        if (sample.empty()) {
             return fail("The unmarked-key H.264 fixture must be present.");
         }
         const auto short_root = temp.path() / L"short-h264-vault";
