@@ -1,6 +1,7 @@
 package org.megavideoprotect.app
 
 import android.graphics.Bitmap
+import android.graphics.BitmapFactory
 import androidx.compose.foundation.Image
 import androidx.compose.foundation.background
 import androidx.compose.foundation.gestures.detectTapGestures
@@ -11,6 +12,7 @@ import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.padding
 import androidx.compose.material3.CircularProgressIndicator
@@ -75,7 +77,13 @@ fun ImageViewerScreen(
         val maxDimension = maxOf(metrics.widthPixels, metrics.heightPixels).coerceIn(1024, 2560)
         val decoded = withContext(Dispatchers.Default) {
             runCatching {
-                CoreBridge.nativeDecodeFrame(videoId, 0, maxDimension)?.let(::rgbaToBitmap)
+                if (RemoteVault.connected()) {
+                    RemoteVault.readAll(videoId, 30 * 1024 * 1024)?.let {
+                        BitmapFactory.decodeByteArray(it, 0, it.size)
+                    }
+                } else {
+                    CoreBridge.nativeDecodeFrame(videoId, 0, maxDimension)?.let(::rgbaToBitmap)
+                }
             }.getOrNull()
         }
         bitmap = decoded
@@ -87,7 +95,7 @@ fun ImageViewerScreen(
         offset = if (scale <= 1f) Offset.Zero else offset + panChange
     }
 
-    Column(Modifier.fillMaxSize().background(Mvp.window)) {
+    Column(Modifier.fillMaxSize().background(Mvp.window).safeDrawingPadding()) {
         Row(
             Modifier
                 .fillMaxWidth()

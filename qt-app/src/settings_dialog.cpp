@@ -70,10 +70,14 @@ SettingsDialog::SettingsDialog(
     tagsLayout->addWidget(tagList_);
     tagsLayout->addLayout(tagButtons);
 
-    // --- Playback: streaming cache budget. ---
+    // --- Gallery: fill in thumbnails import could not create. ---
     auto* playbackBox = new QFrame(this);
     playbackBox->setObjectName(QStringLiteral("settingsGroup"));
     auto* playbackLayout = new QFormLayout(playbackBox);
+    regenerateButton_ = new QPushButton(QStringLiteral("Regenerate"), playbackBox);
+    regenerateButton_->setToolTip(QStringLiteral(
+        "Build thumbnails only for videos that do not have one yet"));
+    playbackLayout->addRow(QStringLiteral("Missing thumbnails"), regenerateButton_);
 
     status_ = new QLabel(this);
     status_->setWordWrap(true);
@@ -92,6 +96,8 @@ SettingsDialog::SettingsDialog(
         this, [this] { renameSelectedTag(); });
     connect(removeTagButton_, &QPushButton::clicked,
         this, [this] { removeSelectedTag(); });
+    connect(regenerateButton_, &QPushButton::clicked,
+        this, [this] { beginRegenerateMissing(); });
     connect(cacheCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int) { applyCacheSelection(); });
 
@@ -234,6 +240,68 @@ void SettingsDialog::removeSelectedTag() {
             core::user_message(result.error().code).data()), true);
     }
     reloadTags();
+    emit settingsChanged();
+}
+
+void SettingsDialog::beginRegenerateMissing() {
+    if (!vault_ || !vault_->is_unlocked() || regenerateWatcher_ != nullptr) {
+        return;
+    }
+    setStatus(QStringLiteral("Regenerating missing thumbnails…"), false);
+    regenerateButton_->setEnabled(false);
+    const auto vault = vault_;
+    regenerateWatcher_ =
+        new QFutureWatcher<std::shared_ptr<std::pair<int, int>>>(this);
+    connect(regenerateWatcher_, &QFutureWatcherBase::finished,
+        this, [this] { finishRegenerateMissing(); });
+    regenerateWatcher_->setFuture(QtConcurrent::run([vault] {
+        // first = how many had no thumbnail, second = how many were created.
+        // first < 0 means the gallery could not be listed.
+        auto result = std::make_shared<std::pair<int, int>>(0, 0);
+        const auto videos = vault->list_videos();
+        if (!videos) {
+            result->first = -1;
+            return result;
+        }
+        for (const auto& video : videos.value()) {
+            const auto stored = vault->thumbnail(video.id);
+            if (stored && !stored.value().bytes.empty()) {
+                continue;
+            }
+            ++result->first;
+            const auto generated = vault->generate_thumbnail(video.id, 320U);
+            if (generated && !generated.value().bytes.empty()) {
+                ++result->second;
+            }
+        }
+        return result;
+    }));
+}
+
+void SettingsDialog::finishRegenerateMissing() {
+    auto* completed = regenerateWatcher_;
+    regenerateWatcher_ = nullptr;
+    const auto outcome = completed->result();
+    completed->deleteLater();
+    regenerateButton_->setEnabled(true);
+    const int missing = outcome->first;
+    const int regenerated = outcome->second;
+    if (missing < 0) {
+        setStatus(QStringLiteral("Could not list the vault."), true);
+        return;
+    }
+    if (missing == 0) {
+        setStatus(QStringLiteral("Every video already has a thumbnail."), false);
+        return;
+    }
+    if (regenerated == missing) {
+        setStatus(QStringLiteral("Regenerated %1 missing thumbnail(s).").arg(regenerated), false);
+    } else {
+        setStatus(QStringLiteral("Regenerated %1 of %2 missing thumbnail(s).")
+            .arg(regenerated)
+            .arg(missing),
+            regenerated == 0);
+    }
     emit settingsChanged();
 }
 

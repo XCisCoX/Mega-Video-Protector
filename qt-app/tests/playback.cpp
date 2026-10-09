@@ -466,6 +466,57 @@ int checkSeek(videovault::app::MediaDecoder& decoder, const char* label,
     return 0;
 }
 
+// Solid red RGB PNG. No alpha plane: this is the file that used to open as
+// a blank window because the converted frame's alpha byte stayed 0.
+bool writeRgbPng(const std::filesystem::path& path, const int width, const int height) {
+    const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_PNG);
+    if (encoder == nullptr) {
+        return false;
+    }
+    AVCodecContext* codec = avcodec_alloc_context3(encoder);
+    if (codec == nullptr) {
+        return false;
+    }
+    codec->width = width;
+    codec->height = height;
+    codec->pix_fmt = AV_PIX_FMT_RGB24;
+    codec->time_base = AVRational{1, 25};
+    if (avcodec_open2(codec, encoder, nullptr) < 0) {
+        avcodec_free_context(&codec);
+        return false;
+    }
+    AVFrame* frame = av_frame_alloc();
+    frame->format = AV_PIX_FMT_RGB24;
+    frame->width = width;
+    frame->height = height;
+    if (av_frame_get_buffer(frame, 0) < 0) {
+        av_frame_free(&frame);
+        avcodec_free_context(&codec);
+        return false;
+    }
+    for (int y = 0; y < height; ++y) {
+        auto* row = frame->data[0] + static_cast<std::size_t>(y) * static_cast<std::size_t>(frame->linesize[0]);
+        for (int x = 0; x < width; ++x) {
+            row[x * 3 + 0] = 220;
+            row[x * 3 + 1] = 20;
+            row[x * 3 + 2] = 30;
+        }
+    }
+    const bool sent = avcodec_send_frame(codec, frame) >= 0;
+    av_frame_free(&frame);
+    AVPacket* packet = av_packet_alloc();
+    const bool got = sent && avcodec_receive_packet(codec, packet) >= 0 && packet->size > 0;
+    bool wrote = false;
+    if (got) {
+        std::ofstream out(path, std::ios::binary);
+        out.write(reinterpret_cast<const char*>(packet->data), packet->size);
+        wrote = static_cast<bool>(out);
+    }
+    av_packet_free(&packet);
+    avcodec_free_context(&codec);
+    return wrote;
+}
+
 } // namespace
 
 int main() {
@@ -753,5 +804,82 @@ int main() {
 
     std::printf("Headless player seek checks succeeded (%d -> %d -> %d -> %d ms).\n",
         pos_before, pos_after, pos_later, pos_back);
+
+    // A real RGB photo, not a 1x1 test pattern, opened in the actual window.
+    // This is the path that stayed black: the player must show an opaque frame.
+    {
+        const auto photo_path = temp.path() / L"photo.png";
+        if (!writeRgbPng(photo_path, 320, 240)) {
+            return fail("Writing a 320x240 PNG must succeed.");
+        }
+        const auto photo_root = temp.path() / L"photo-vault";
+        auto photo_vault = Vault::create(photo_root, "photo password", testParameters());
+        if (!photo_vault) {
+            return fail("Creating a vault for the photo PNG must succeed.");
+        }
+        const auto photo_id = photo_vault.value().import_file(photo_path);
+        if (!photo_id) {
+            return fail("Importing a 320x240 PNG must succeed.");
+        }
+        auto photo_opened = std::make_shared<Vault>(std::move(photo_vault.value()));
+        const auto thumb = photo_opened->thumbnail(photo_id.value());
+        if (!thumb || thumb.value().bytes.empty()) {
+            return fail("A 320x240 PNG must get a thumbnail at import.");
+        }
+        videovault::app::PlayerWindow photo_player(
+            photo_opened, photo_id.value(), QStringLiteral("photo.png"));
+        spin(std::chrono::milliseconds(800));
+        auto* surface = photo_player.findChild<videovault::app::VideoSurface*>();
+        if (surface == nullptr) {
+            return fail("The player must have a video surface.");
+        }
+        if (surface->frame().isNull()) {
+            std::fprintf(stderr, "PNG player status: %s\n",
+                qPrintable(surface->statusText()));
+            return fail("Opening a PNG in the player must show the picture.");
+        }
+        const QColor pixel = surface->frame().pixelColor(
+            surface->frame().width() / 2, surface->frame().height() / 2);
+        if (pixel.alpha() != 255 || pixel.red() < 180) {
+            std::fprintf(stderr, "PNG pixel rgba %d %d %d %d\n",
+                pixel.red(), pixel.green(), pixel.blue(), pixel.alpha());
+            return fail("The opened PNG must be an opaque red picture, not a blank frame.");
+        }
+        std::printf("PNG player open checks succeeded (%dx%d).\n",
+            surface->frame().width(), surface->frame().height());
+
+        const std::filesystem::path png_samples[] = {
+            std::filesystem::path("docs") / "MVP-logo.png",
+            std::filesystem::path("docs") / "screenshots" / "01-setup.png",
+            std::filesystem::path("docs") / "screenshots" / "06-player.png",
+        };
+        for (const auto& sample : png_samples) {
+            const auto sample_id = photo_opened->import_file(sample);
+            if (!sample_id) {
+                std::fprintf(stderr, "Import failed for %ls\n", sample.c_str());
+                return fail("Importing a real PNG from the repo must succeed.");
+            }
+            videovault::app::MediaDecoder sample_decoder;
+            QString sample_error;
+            if (!sample_decoder.open(photo_opened, sample_id.value(), &sample_error)) {
+                std::fprintf(stderr, "Open failed for %ls: %s\n",
+                    sample.c_str(), qPrintable(sample_error));
+                return fail("A real PNG must open in the viewer.");
+            }
+            videovault::app::DecodedFrame sample_frame;
+            if (!sample_decoder.decode_next_video_frame(&sample_frame)
+                || sample_frame.image.isNull()
+                || sample_frame.image.pixelColor(0, 0).alpha() != 255) {
+                std::fprintf(stderr, "Decode failed for %ls (%dx%d codec %s)\n",
+                    sample.c_str(), sample_decoder.video_width(),
+                    sample_decoder.video_height(),
+                    sample_decoder.video_codec_name().c_str());
+                return fail("A real PNG must decode to an opaque frame.");
+            }
+            std::printf("Real PNG opened: %ls %dx%d %s\n",
+                sample.c_str(), sample_frame.image.width(), sample_frame.image.height(),
+                sample_decoder.video_codec_name().c_str());
+        }
+    }
     return EXIT_SUCCESS;
 }

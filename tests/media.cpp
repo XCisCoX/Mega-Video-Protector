@@ -492,6 +492,45 @@ int main() {
         }
     }
 
+    // An H.264 clip whose sync-sample table does not flag the IDR. The
+    // keyframe-only thumbnail walk used to drop every packet and import
+    // stored no JPEG. The fixture is tests/fixtures/h264-unmarked-key.mp4;
+    // ctest's working directory is the tests build dir, three levels down.
+    {
+        const std::filesystem::path relative =
+            std::filesystem::path(L"tests") / L"fixtures" / L"h264-unmarked-key.mp4";
+        std::filesystem::path sample = relative;
+        if (!std::filesystem::exists(sample)) {
+            sample = std::filesystem::path(L"..") / L".." / L".." / relative;
+        }
+        if (!std::filesystem::exists(sample)) {
+            return fail("The unmarked-key H.264 fixture must be present.");
+        }
+        const auto short_root = temp.path() / L"short-h264-vault";
+        auto vault = Vault::create(short_root, "short h264 password", testParameters());
+        if (!vault) {
+            return fail("Creating a vault for the unmarked-key H.264 sample must succeed.");
+        }
+        const auto id = vault.value().import_file(sample);
+        if (!id) {
+            std::cerr << "unmarked-key import failed: " << id.error().technical_detail << "\n";
+            return fail("Importing the unmarked-key H.264 sample must succeed.");
+        }
+        const auto generated = vault.value().generate_thumbnail(id.value(), 320U);
+        if (!generated) {
+            std::cerr << "unmarked-key generate_thumbnail failed: "
+                << generated.error().technical_detail << "\n";
+        }
+        const auto thumb = vault.value().thumbnail(id.value());
+        if (!thumb || thumb.value().bytes.empty() || !isJpeg(thumb.value().bytes)) {
+            std::cerr << "unmarked-key thumbnail missing: "
+                << (thumb ? "empty jpeg" : thumb.error().technical_detail) << "\n";
+            return fail("Importing an H.264 clip with no flagged keyframe must auto-generate a thumbnail.");
+        }
+        std::cout << "unmarked-key thumbnail " << thumb.value().width << "x"
+            << thumb.value().height << " (" << thumb.value().bytes.size() << " bytes)\n";
+    }
+
     std::cout << "Media probing and thumbnail checks succeeded.\n";
     return EXIT_SUCCESS;
 }

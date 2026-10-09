@@ -49,6 +49,7 @@ struct TagEditorData {
 };
 
 class BatchWorker;
+class ShareServer;
 
 class MainWindow final : public QMainWindow {
 public:
@@ -95,6 +96,7 @@ private:
     void showSetup();
     void showLogin(const std::filesystem::path& path);
     void showUnlocked();
+    void openShare();
     void lockVault();
     void resetAutoLock();
     void setError(QLabel* label, const QString& message);
@@ -121,6 +123,7 @@ private:
     QPushButton* importButton_{nullptr};
     QPushButton* importFolderButton_{nullptr};
     QPushButton* settingsButton_{nullptr};
+    QPushButton* shareButton_{nullptr};
     QComboBox* viewModeCombo_{nullptr};
     QComboBox* tagFilterCombo_{nullptr};
     QLineEdit* searchEdit_{nullptr};
@@ -155,6 +158,8 @@ private:
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;
+    // Declared after the vault so sharing stops before the vault is destroyed.
+    std::unique_ptr<ShareServer> shareServer_;
 };
 
 } // namespace videovault::app

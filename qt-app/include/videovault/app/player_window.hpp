@@ -98,6 +98,7 @@ public:
     }
 
     const QImage& frame() const { return frame_; }
+    const QString& statusText() const { return text_; }
 
 protected:
     void paintEvent(QPaintEvent*) override {

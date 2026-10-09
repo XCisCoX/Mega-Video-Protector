@@ -6,6 +6,7 @@
 
 #include <jni.h>
 
+#include <algorithm>
 #include <atomic>
 #include <cstdint>
 #include <cstdio>
@@ -15,6 +16,7 @@
 #include <optional>
 #include <span>
 #include <string>
+#include <unordered_map>
 #include <vector>
 
 extern "C" {
@@ -22,6 +24,7 @@ extern "C" {
 #include <libavformat/avformat.h>
 #include <libavutil/error.h>
 #include <libavutil/imgutils.h>
+#include <libswresample/swresample.h>
 #include <libswscale/swscale.h>
 }
 
@@ -33,6 +36,72 @@ namespace {
 
 std::mutex g_mutex;
 std::unique_ptr<Vault> g_vault;
+
+// Plaintext of small videos, kept while the vault is unlocked. A loop used to
+// open the package and decrypt it again on every repeat — for a clip under a
+// second that cost more than the clip itself. The first read pays for the
+// decrypt; later seeks and repeats copy from here.
+constexpr std::size_t kPlainFileCap = 12U << 20;
+constexpr std::size_t kPlainTotalCap = 48U << 20;
+std::unordered_map<std::int64_t, std::uint64_t> g_sizes;
+std::unordered_map<std::int64_t, std::vector<unsigned char>> g_plain;
+std::size_t g_plain_bytes = 0;
+
+void wipe_plain(std::vector<unsigned char>& bytes) {
+    std::fill(bytes.begin(), bytes.end(), 0U);
+    bytes.clear();
+    bytes.shrink_to_fit();
+}
+
+void forget_plain(const std::int64_t id) {
+    auto it = g_plain.find(id);
+    if (it != g_plain.end()) {
+        g_plain_bytes -= it->second.size();
+        wipe_plain(it->second);
+        g_plain.erase(it);
+    }
+    g_sizes.erase(id);
+}
+
+void clear_plain() {
+    for (auto& entry : g_plain) wipe_plain(entry.second);
+    g_plain.clear();
+    g_sizes.clear();
+    g_plain_bytes = 0;
+}
+
+std::optional<std::uint64_t> lookup_size(Vault& vault, const std::int64_t id) {
+    auto known = g_sizes.find(id);
+    if (known != g_sizes.end()) return known->second;
+    auto list = vault.list_videos();
+    if (!list) return std::nullopt;
+    std::optional<std::uint64_t> found;
+    for (const auto& video : list.value()) {
+        g_sizes[video.id] = video.original_size;
+        if (video.id == id) found = video.original_size;
+    }
+    return found;
+}
+
+// Loads the whole plaintext once when it fits in the cap. Returns null when
+// the video is missing or too big to keep (those keep streaming per range).
+const std::vector<unsigned char>* ensure_plain(Vault& vault, const std::int64_t id) {
+    auto it = g_plain.find(id);
+    if (it != g_plain.end()) return &it->second;
+    auto size = lookup_size(vault, id);
+    if (!size || size.value() == 0U || size.value() > kPlainFileCap) return nullptr;
+    auto all = vault.read_video_range(id, 0U, static_cast<std::size_t>(size.value()));
+    if (!all || all.value().size() != static_cast<std::size_t>(size.value())) return nullptr;
+    while (!g_plain.empty() && g_plain_bytes + all.value().size() > kPlainTotalCap) {
+        auto drop = g_plain.begin();
+        g_plain_bytes -= drop->second.size();
+        wipe_plain(drop->second);
+        g_plain.erase(drop);
+    }
+    g_plain_bytes += all.value().size();
+    auto placed = g_plain.emplace(id, std::move(all.value()));
+    return &placed.first->second;
+}
 
 std::string json_escape(const std::string& s) {
     std::string out;
@@ -199,6 +268,17 @@ struct RangeReader {
     }
 
     std::optional<std::size_t> read(std::span<unsigned char> dst) {
+        if (dst.empty()) return std::size_t{0};
+        if (vault != nullptr) {
+            if (const auto* cached = ensure_plain(*vault, video_id)) {
+                if (pos >= cached->size()) return std::size_t{0};
+                const auto n = std::min(
+                    dst.size(), cached->size() - static_cast<std::size_t>(pos));
+                std::memcpy(dst.data(), cached->data() + static_cast<std::size_t>(pos), n);
+                pos += n;
+                return n;
+            }
+        }
         auto got = vault->read_video_range(video_id, pos, dst.size());
         if (!got) return std::nullopt;
         auto& bytes = got.value();
@@ -406,6 +486,261 @@ std::optional<std::vector<unsigned char>> decode_frame_at(
     return out;
 }
 
+void append_u32(std::vector<unsigned char>& out, const std::uint32_t value) {
+    out.push_back(static_cast<unsigned char>(value & 0xFFU));
+    out.push_back(static_cast<unsigned char>((value >> 8U) & 0xFFU));
+    out.push_back(static_cast<unsigned char>((value >> 16U) & 0xFFU));
+    out.push_back(static_cast<unsigned char>((value >> 24U) & 0xFFU));
+}
+
+// One JPEG of a decoded frame. The encoder is reused; each picture is its own
+// packet, so a repeat can draw frames without opening the codec again.
+bool append_jpeg(
+    AVCodecContext* encoder,
+    SwsContext* scaler,
+    AVFrame* yuv,
+    const AVFrame* source,
+    std::vector<unsigned char>& out) {
+    sws_scale(scaler, source->data, source->linesize, 0, source->height, yuv->data, yuv->linesize);
+    if (avcodec_send_frame(encoder, yuv) < 0) return false;
+    std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
+    if (!packet) return false;
+    if (avcodec_receive_packet(encoder, packet.get()) < 0) return false;
+    append_u32(out, static_cast<std::uint32_t>(packet->size));
+    out.insert(out.end(), packet->data, packet->data + packet->size);
+    return true;
+}
+
+// Clips of about a second or less. ExoPlayer repeats them by seeking back to
+// the start, which flushes the decoder and (without the plaintext cache) decrypts
+// the package again — longer than the clip. This walks the file once and returns
+// the pictures plus PCM so the phone can loop them in memory.
+// Empty means "not a short clip" (or it could not be decoded).
+std::optional<std::vector<unsigned char>> decode_short_loop(
+    Vault& vault, const std::int64_t video_id, const std::uint32_t max_dimension) {
+    RangeReader reader{&vault, video_id, 0};
+    auto* io_buffer = static_cast<unsigned char*>(av_malloc(kAvioBufferSize));
+    if (io_buffer == nullptr) return std::nullopt;
+    AVIOContext* raw_io = avio_alloc_context(
+        io_buffer, static_cast<int>(kAvioBufferSize), 0, &reader,
+        read_packet, nullptr, seek_packet);
+    if (raw_io == nullptr) {
+        av_free(io_buffer);
+        return std::nullopt;
+    }
+    std::unique_ptr<AVIOContext, AvIoDeleter> io(raw_io);
+    raw_io->seekable = AVIO_SEEKABLE_NORMAL;
+    auto format = open_format_with_hint(io.get(), reader, nullptr);
+    if (!format) return std::nullopt;
+    AVFormatContext* raw_format = format.get();
+    if (avformat_find_stream_info(raw_format, nullptr) < 0) return std::nullopt;
+
+    int video_index = -1;
+    int audio_index = -1;
+    for (unsigned i = 0; i < raw_format->nb_streams; ++i) {
+        const auto type = raw_format->streams[i]->codecpar->codec_type;
+        if (type == AVMEDIA_TYPE_VIDEO && video_index < 0) video_index = static_cast<int>(i);
+        if (type == AVMEDIA_TYPE_AUDIO && audio_index < 0) audio_index = static_cast<int>(i);
+    }
+    if (video_index < 0) return std::nullopt;
+
+    auto duration_us = raw_format->duration;
+    AVStream* video_stream = raw_format->streams[video_index];
+    if ((duration_us <= 0 || duration_us == AV_NOPTS_VALUE)
+        && video_stream->duration > 0 && video_stream->duration != AV_NOPTS_VALUE) {
+        duration_us = av_rescale_q(video_stream->duration, video_stream->time_base, AV_TIME_BASE_Q);
+    }
+    // Longer clips stay on ExoPlayer. Only the ones that would restart the
+    // decoder more often than they play are unpacked here.
+    constexpr std::int64_t kShortLimitUs = 1500LL * 1000LL;
+    if (duration_us > 0 && duration_us != AV_NOPTS_VALUE && duration_us > kShortLimitUs) {
+        return std::nullopt;
+    }
+
+    const AVCodec* video_decoder = avcodec_find_decoder(video_stream->codecpar->codec_id);
+    if (video_decoder == nullptr) return std::nullopt;
+    std::unique_ptr<AVCodecContext, AvCodecDeleter> video_codec(avcodec_alloc_context3(video_decoder));
+    if (!video_codec) return std::nullopt;
+    if (avcodec_parameters_to_context(video_codec.get(), video_stream->codecpar) < 0) return std::nullopt;
+    if (avcodec_open2(video_codec.get(), video_decoder, nullptr) < 0) return std::nullopt;
+
+    std::unique_ptr<AVCodecContext, AvCodecDeleter> audio_codec;
+    std::unique_ptr<SwrContext, void(*)(SwrContext*)> swr(nullptr, [](SwrContext* c) { swr_free(&c); });
+    int sample_rate = 0;
+    int channels = 0;
+    if (audio_index >= 0) {
+        AVStream* audio_stream = raw_format->streams[audio_index];
+        const AVCodec* audio_decoder = avcodec_find_decoder(audio_stream->codecpar->codec_id);
+        if (audio_decoder != nullptr) {
+            audio_codec.reset(avcodec_alloc_context3(audio_decoder));
+            if (audio_codec
+                && avcodec_parameters_to_context(audio_codec.get(), audio_stream->codecpar) >= 0
+                && avcodec_open2(audio_codec.get(), audio_decoder, nullptr) >= 0) {
+                sample_rate = 44100;
+                channels = 2;
+                AVChannelLayout out_layout;
+                av_channel_layout_default(&out_layout, channels);
+                SwrContext* raw_swr = nullptr;
+                if (swr_alloc_set_opts2(
+                        &raw_swr, &out_layout, AV_SAMPLE_FMT_S16, sample_rate,
+                        &audio_codec->ch_layout, audio_codec->sample_fmt, audio_codec->sample_rate,
+                        0, nullptr) < 0
+                    || raw_swr == nullptr || swr_init(raw_swr) < 0) {
+                    swr_free(&raw_swr);
+                    audio_codec.reset();
+                    sample_rate = 0;
+                    channels = 0;
+                } else {
+                    swr.reset(raw_swr);
+                }
+                av_channel_layout_uninit(&out_layout);
+            }
+        }
+    }
+
+    std::unique_ptr<AVFrame, AvFrameDeleter> frame(av_frame_alloc());
+    std::unique_ptr<AVPacket, AvPacketDeleter> packet(av_packet_alloc());
+    if (!frame || !packet) return std::nullopt;
+
+    std::vector<std::pair<std::int64_t, std::vector<unsigned char>>> pictures;
+    std::vector<unsigned char> pcm;
+    constexpr int kMaxFrames = 48;
+    bool truncated = false;
+    std::int64_t origin = AV_NOPTS_VALUE;
+
+    std::unique_ptr<AVCodecContext, AvCodecDeleter> jpeg;
+    std::unique_ptr<SwsContext, SwsDeleter> scaler;
+    std::unique_ptr<AVFrame, AvFrameDeleter> yuv;
+    int jpeg_w = 0;
+    int jpeg_h = 0;
+
+    auto take_video = [&](AVFrame* picture) -> bool {
+        std::int64_t stamp = picture->best_effort_timestamp;
+        if (stamp == AV_NOPTS_VALUE) stamp = picture->pts;
+        std::int64_t us = 0;
+        if (stamp != AV_NOPTS_VALUE) {
+            if (origin == AV_NOPTS_VALUE) origin = stamp;
+            us = av_rescale_q(stamp - origin, video_stream->time_base, AV_TIME_BASE_Q);
+            if (us < 0) us = 0;
+        }
+        if (us > kShortLimitUs || static_cast<int>(pictures.size()) >= kMaxFrames) {
+            truncated = true;
+            return false;
+        }
+        int w = picture->width;
+        int h = picture->height;
+        if (w < 2 || h < 2) return true;
+        if (max_dimension > 0 && (static_cast<std::uint32_t>(w) > max_dimension
+                || static_cast<std::uint32_t>(h) > max_dimension)) {
+            if (w >= h) {
+                h = std::max(2, h * static_cast<int>(max_dimension) / w);
+                w = static_cast<int>(max_dimension);
+            } else {
+                w = std::max(2, w * static_cast<int>(max_dimension) / h);
+                h = static_cast<int>(max_dimension);
+            }
+        }
+        w &= ~1;
+        h &= ~1;
+        if (!jpeg || w != jpeg_w || h != jpeg_h) {
+            const AVCodec* encoder = avcodec_find_encoder(AV_CODEC_ID_MJPEG);
+            if (encoder == nullptr) return false;
+            jpeg.reset(avcodec_alloc_context3(encoder));
+            if (!jpeg) return false;
+            jpeg->width = w;
+            jpeg->height = h;
+            jpeg->time_base = AVRational{1, 25};
+            jpeg->pix_fmt = AV_PIX_FMT_YUV420P;
+            jpeg->color_range = AVCOL_RANGE_JPEG;
+            if (avcodec_open2(jpeg.get(), encoder, nullptr) < 0) return false;
+            scaler.reset(sws_getContext(
+                picture->width, picture->height, static_cast<AVPixelFormat>(picture->format),
+                w, h, AV_PIX_FMT_YUV420P, SWS_BILINEAR, nullptr, nullptr, nullptr));
+            if (!scaler) return false;
+            yuv.reset(av_frame_alloc());
+            if (!yuv) return false;
+            yuv->format = AV_PIX_FMT_YUV420P;
+            yuv->width = w;
+            yuv->height = h;
+            if (av_frame_get_buffer(yuv.get(), 0) < 0) return false;
+            jpeg_w = w;
+            jpeg_h = h;
+        }
+        if (av_frame_make_writable(yuv.get()) < 0) return false;
+        std::vector<unsigned char> body;
+        if (!append_jpeg(jpeg.get(), scaler.get(), yuv.get(), picture, body)) return false;
+        pictures.emplace_back(us, std::move(body));
+        return true;
+    };
+
+    auto take_audio = [&](AVFrame* audio) {
+        if (!swr || sample_rate <= 0) return;
+        constexpr std::size_t kMaxPcm = 44100U * 2U * 2U * 2U;
+        if (pcm.size() >= kMaxPcm) return;
+        const int out_samples = swr_get_out_samples(swr.get(), audio->nb_samples);
+        if (out_samples <= 0) return;
+        std::vector<unsigned char> chunk(static_cast<std::size_t>(out_samples) * static_cast<std::size_t>(channels) * 2U);
+        uint8_t* dest[1] = {chunk.data()};
+        const int got = swr_convert(swr.get(), dest, out_samples, audio->extended_data, audio->nb_samples);
+        if (got <= 0) return;
+        const auto bytes = static_cast<std::size_t>(got) * static_cast<std::size_t>(channels) * 2U;
+        const auto room = kMaxPcm - pcm.size();
+        pcm.insert(pcm.end(), chunk.begin(), chunk.begin() + static_cast<std::ptrdiff_t>(std::min(bytes, room)));
+    };
+
+    std::int64_t packets = 0;
+    while (!truncated && packets++ < kMaxDecodePackets) {
+        const int status = av_read_frame(raw_format, packet.get());
+        if (status < 0) break;
+        const int index = packet->stream_index;
+        if (index == video_index) {
+            if (avcodec_send_packet(video_codec.get(), packet.get()) == 0) {
+                while (avcodec_receive_frame(video_codec.get(), frame.get()) == 0) {
+                    if (!take_video(frame.get())) break;
+                }
+            }
+        } else if (audio_codec && index == audio_index) {
+            if (avcodec_send_packet(audio_codec.get(), packet.get()) == 0) {
+                while (avcodec_receive_frame(audio_codec.get(), frame.get()) == 0) {
+                    take_audio(frame.get());
+                }
+            }
+        }
+        av_packet_unref(packet.get());
+    }
+    if (!truncated) {
+        avcodec_send_packet(video_codec.get(), nullptr);
+        while (avcodec_receive_frame(video_codec.get(), frame.get()) == 0) {
+            if (!take_video(frame.get())) break;
+        }
+        if (audio_codec) {
+            avcodec_send_packet(audio_codec.get(), nullptr);
+            while (avcodec_receive_frame(audio_codec.get(), frame.get()) == 0) {
+                take_audio(frame.get());
+            }
+        }
+    }
+    if (pictures.empty() || truncated) return std::nullopt;
+
+    std::vector<unsigned char> out;
+    out.reserve(64U * 1024U);
+    append_u32(out, 0x504F4F4CU);
+    append_u32(out, static_cast<std::uint32_t>(pictures.size()));
+    for (const auto& picture : pictures) {
+        append_u32(out, static_cast<std::uint32_t>(std::max<std::int64_t>(picture.first, 0)));
+        out.insert(out.end(), picture.second.begin(), picture.second.end());
+    }
+    if (pcm.empty()) {
+        sample_rate = 0;
+        channels = 0;
+    }
+    append_u32(out, static_cast<std::uint32_t>(sample_rate));
+    append_u32(out, static_cast<std::uint32_t>(channels));
+    append_u32(out, static_cast<std::uint32_t>(pcm.size()));
+    out.insert(out.end(), pcm.begin(), pcm.end());
+    return out;
+}
+
 std::string videos_json() {
     if (!g_vault) return "[]";
     auto list = g_vault->list_videos();
@@ -525,6 +860,7 @@ JNIEXPORT jboolean JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeIsUnlo
 
 JNI_METHOD(nativeLock)(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    clear_plain();
     if (g_vault) g_vault->lock();
     return to_jstring(env, ok_json());
 }
@@ -550,6 +886,7 @@ JNI_METHOD(nativeRemoveVideo)(JNIEnv* env, jobject, jlong id) {
     if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
     auto result = g_vault->remove_video(id);
     if (!result) return to_jstring(env, err_json(result.error()));
+    forget_plain(static_cast<std::int64_t>(id));
     return to_jstring(env, ok_json());
 }
 
@@ -664,14 +1001,9 @@ JNIEXPORT jlong JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVideoSize
     JNIEnv*, jobject, jlong id) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return -1;
-    auto list = g_vault->list_videos();
-    if (!list) return -1;
-    for (const auto& video : list.value()) {
-        if (video.id == static_cast<std::int64_t>(id)) {
-            return static_cast<jlong>(video.original_size);
-        }
-    }
-    return -1;
+    auto size = lookup_size(*g_vault, static_cast<std::int64_t>(id));
+    if (!size) return -1;
+    return static_cast<jlong>(size.value());
 }
 
 // Streaming read for the player (Media3 DataSource): returns up to `size`
@@ -680,9 +1012,23 @@ JNIEXPORT jlong JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeVideoSize
 JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeReadRange(
     JNIEnv* env, jobject, jlong id, jlong offset, jint size) {
     std::lock_guard<std::mutex> lock(g_mutex);
-    if (!g_vault || size <= 0) return nullptr;
-    auto bytes = g_vault->read_video_range(static_cast<std::int64_t>(id),
-        static_cast<std::uint64_t>(offset), static_cast<std::size_t>(size));
+    if (!g_vault || size <= 0 || offset < 0) return nullptr;
+    const auto video = static_cast<std::int64_t>(id);
+    const auto at = static_cast<std::uint64_t>(offset);
+    if (const auto* cached = ensure_plain(*g_vault, video)) {
+        if (at >= cached->size()) {
+            return env->NewByteArray(0);
+        }
+        const auto n = std::min(
+            static_cast<std::size_t>(size), cached->size() - static_cast<std::size_t>(at));
+        jbyteArray out = env->NewByteArray(static_cast<jsize>(n));
+        if (out != nullptr && n > 0U) {
+            env->SetByteArrayRegion(out, 0, static_cast<jsize>(n),
+                reinterpret_cast<const jbyte*>(cached->data() + static_cast<std::size_t>(at)));
+        }
+        return out;
+    }
+    auto bytes = g_vault->read_video_range(video, at, static_cast<std::size_t>(size));
     if (!bytes) return nullptr;
     auto& data = bytes.value();
     jbyteArray out = env->NewByteArray(static_cast<jsize>(data.size()));
@@ -693,8 +1039,24 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeRead
     return out;
 }
 
+JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeLoopClip(
+    JNIEnv* env, jobject, jlong id, jint max_dimension) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault || max_dimension <= 0) return nullptr;
+    auto bytes = decode_short_loop(*g_vault, static_cast<std::int64_t>(id),
+        static_cast<std::uint32_t>(max_dimension));
+    if (!bytes || bytes->empty()) return nullptr;
+    jbyteArray out = env->NewByteArray(static_cast<jsize>(bytes->size()));
+    if (out != nullptr) {
+        env->SetByteArrayRegion(out, 0, static_cast<jsize>(bytes->size()),
+            reinterpret_cast<const jbyte*>(bytes->data()));
+    }
+    return out;
+}
+
 JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {
     std::lock_guard<std::mutex> lock(g_mutex);
+    clear_plain();
     g_vault.reset();
     return to_jstring(env, ok_json());
 }

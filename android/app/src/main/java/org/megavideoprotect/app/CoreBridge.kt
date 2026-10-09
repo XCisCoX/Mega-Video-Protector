@@ -32,6 +32,8 @@ object CoreBridge {
     external fun nativeCreateTag(name: String): String
     external fun nativeVideoSize(id: Long): Long
     external fun nativeReadRange(id: Long, offset: Long, size: Int): ByteArray?
+    /** Short clips only. Null means the video is longer than about 1.5s, so ExoPlayer should play it. */
+    external fun nativeLoopClip(id: Long, maxDimension: Int): ByteArray?
     external fun nativeClose()
 
     class Result(val ok: Boolean, val error: String, val detail: String) {

@@ -7,6 +7,7 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.padding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
@@ -86,6 +87,7 @@ fun SetupScreen(
                 .verticalScroll(rememberScrollState())
                 // Edge-to-edge activity: pad by the IME inset so the soft
                 // keyboard does not cover the Create vault button.
+                .safeDrawingPadding()
                 .imePadding()
                 .padding(24.dp),
             horizontalAlignment = Alignment.CenterHorizontally,

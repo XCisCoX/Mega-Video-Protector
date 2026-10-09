@@ -335,14 +335,6 @@ public:
         QString* error) {
         close();
 
-        auto info = vault->media_info(video_id);
-        if (!info) {
-            if (error != nullptr) {
-                *error = QString::fromUtf8(info.error().technical_detail.c_str());
-            }
-            return false;
-        }
-
         // The package plaintext size for the AVIO size callback. The encrypted
         // .vvp file is LARGER than the plaintext (header + per-chunk AEAD
         // overhead); using it would skew SEEK_END/AVSEEK_SIZE and the stream
@@ -529,6 +521,17 @@ public:
                 raw_format->streams[video_stream_]->duration,
                 raw_format->streams[video_stream_]->time_base);
         }
+        // Probing reads the only packet of a still. Put the demuxer back at
+        // the start so the player actually gets that frame.
+        const std::string codec = video_codec_name();
+        if (codec == "png" || codec == "apng" || codec == "bmp"
+            || codec == "webp" || codec == "gif" || codec == "tiff") {
+            av_seek_frame(raw_format, video_stream_, 0, AVSEEK_FLAG_BYTE);
+            avformat_flush(raw_format);
+            if (video_codec_) {
+                avcodec_flush_buffers(video_codec_.get());
+            }
+        }
         return true;
     }
 
@@ -594,7 +597,17 @@ public:
             AvPacketPtr packet(av_packet_alloc());
             const int read_status = av_read_frame(handle_->format.get(), packet.get());
             if (read_status < 0) {
-                return false; // EOF or error
+                // A one-packet PNG can stay inside the decoder until flush.
+                // Without this the viewer hits EOF and never shows the picture.
+                if (video_codec_ && avcodec_send_packet(video_codec_.get(), nullptr) >= 0) {
+                    AvFramePtr decoded(av_frame_alloc());
+                    if (avcodec_receive_frame(video_codec_.get(), decoded.get()) >= 0) {
+                        frame->image = convert_frame(decoded.get());
+                        frame->pts_ms = frame_pts_ms(decoded.get(), video_time_base_);
+                        return !frame->image.isNull();
+                    }
+                }
+                return false;
             }
             const int stream_index = packet->stream_index;
             if (stream_index == video_stream_) {
@@ -715,6 +728,16 @@ private:
             // Format_RGB32 is painted with the alpha byte on Windows, so a
             // transparent PNG would show as holes instead of the picture.
             composite_bgra(rgb->data[0], rgb->linesize[0], output_width, output_height);
+        } else {
+            // RGB PNGs have no alpha plane. swscale's BGRA output can leave
+            // that byte at 0, and Windows then paints the whole picture gone.
+            for (int y = 0; y < output_height; ++y) {
+                auto* row = rgb->data[0]
+                    + static_cast<std::size_t>(y) * static_cast<std::size_t>(rgb->linesize[0]);
+                for (int x = 0; x < output_width; ++x) {
+                    row[static_cast<std::size_t>(x) * 4U + 3U] = 255;
+                }
+            }
         }
         QImage image(
             rgb->data[0], output_width, output_height,

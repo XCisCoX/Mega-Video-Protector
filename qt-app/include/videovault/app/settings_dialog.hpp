@@ -3,6 +3,7 @@
 #include <QDialog>
 
 #include <memory>
+#include <utility>
 
 class QComboBox;
 class QLabel;
@@ -43,6 +44,8 @@ private:
     void renameSelectedTag();
     void removeSelectedTag();
     void applyCacheSelection();
+    void beginRegenerateMissing();
+    void finishRegenerateMissing();
     void setStatus(const QString& message, bool error = false);
 
     std::shared_ptr<videovault::core::Vault> vault_;
@@ -63,6 +66,10 @@ private:
 
     // Playback section.
     QComboBox* cacheCombo_{nullptr};
+
+    // Rebuilds stored thumbnails that import never managed to create.
+    QPushButton* regenerateButton_{nullptr};
+    QFutureWatcher<std::shared_ptr<std::pair<int, int>>>* regenerateWatcher_{nullptr};
 
     QLabel* status_{nullptr};
 };

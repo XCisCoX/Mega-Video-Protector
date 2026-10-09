@@ -5,6 +5,7 @@ find_package(Qt5 5.12 REQUIRED COMPONENTS
     Core
     Concurrent
     Widgets
+    Network
     Multimedia
     MultimediaWidgets
 )
@@ -22,11 +23,14 @@ set(MVP_APP_SOURCES
     src/player_window.cpp
     src/settings_dialog.cpp
     src/batch_worker.cpp
+    src/share_server.cpp
+    third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
+    include/videovault/app/share_server.hpp
     resources/resources.qrc
 )
 
@@ -49,6 +53,7 @@ endif()
 
 target_include_directories(VideoVaultApp PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/third_party/qrcodegen
 )
 if(WIN32)
     # vcpkg FFmpeg headers (Linux pkg-config targets carry their own includes).
@@ -64,6 +69,7 @@ target_link_libraries(VideoVaultApp
         Qt5::Core
         Qt5::Concurrent
         Qt5::Widgets
+        Qt5::Network
         Qt5::Multimedia
         Qt5::MultimediaWidgets
         ${MVP_FFMPEG_LIBS}

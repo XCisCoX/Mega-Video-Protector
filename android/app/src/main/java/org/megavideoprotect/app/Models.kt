@@ -41,6 +41,9 @@ data class VideoEntry(
 
 data class TagEntry(val id: Long, val name: String, val videoCount: Long)
 
+/** One playable gallery row, in the order the player should step through. */
+data class PlayItem(val id: Long, val name: String)
+
 object Json {
     fun videos(raw: String): List<VideoEntry> {
         val out = ArrayList<VideoEntry>()
@@ -82,7 +85,11 @@ sealed interface Screen {
     data object Setup : Screen
     data object Login : Screen
     data object Vault : Screen
-    data class Player(val videoId: Long, val name: String) : Screen
+    data class Player(
+        val videoId: Long,
+        val name: String,
+        val playlist: List<PlayItem> = emptyList(),
+    ) : Screen
     /** A still image: shown in the image viewer, not the media player. */
     data class Image(val videoId: Long, val name: String) : Screen
 }

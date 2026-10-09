@@ -272,7 +272,9 @@ Result<AVStream*> find_video_stream(AVFormatContext* format) {
         return media_error("read stream information", status);
     }
     AVStream* stream = first_video_stream(format);
-    if (stream == nullptr) {
+    if (stream == nullptr || stream->codecpar->width <= 0 || stream->codecpar->height <= 0) {
+        // image2 will claim a ".png" name for any bytes once the PNG decoder
+        // exists, then leave the size unset. That is not a picture.
         return VaultError{VaultErrorCode::UnsupportedVideoFormat,
             "the media container has no video stream"};
     }
@@ -280,9 +282,13 @@ Result<AVStream*> find_video_stream(AVFormatContext* format) {
 }
 
 // Seeks to roughly 30% into the stream and decodes the next video frame.
+// keyframes_only is the gallery path. Pass false after reopening the
+// container to take the first decodable picture when that walk finds none
+// (the demuxer is often left at EOF and will not rewind).
 Result<AvFramePtr> decode_representative_frame(
     AVFormatContext* format,
-    AVStream* stream) {
+    AVStream* stream,
+    const bool keyframes_only = true) {
     const auto duration = duration_milliseconds(format, stream);
     // Single-frame media (images) have no "30% of the video": the only frame
     // is the first one, and seeking a single-frame demuxer can misbehave
@@ -304,7 +310,7 @@ Result<AvFramePtr> decode_representative_frame(
     const auto target_ts = av_rescale_q(
         static_cast<std::int64_t>(target_ms), AV_TIME_BASE_Q, stream->time_base);
     int seek_status = 0;
-    if (!single_frame) {
+    if (!single_frame && keyframes_only) {
         std::snprintf(debug, sizeof(debug), "avio position before seek: %lld",
             static_cast<long long>(format->pb != nullptr ? format->pb->pos : -1));
         debug_log_thumbnail(debug);
@@ -356,7 +362,7 @@ Result<AvFramePtr> decode_representative_frame(
     // some of those demuxers do not mark it as a keyframe. Discarding
     // non-keyframes then drops the only frame, so the gallery never gets a
     // thumbnail. Videos still walk keyframes to reach the 30% mark.
-    if (!single_frame) {
+    if (!single_frame && keyframes_only) {
         codec->skip_frame = AVDISCARD_NONKEY;
     }
 
@@ -475,6 +481,9 @@ Result<AvFramePtr> decode_representative_frame(
                 reached_target = true;
                 break;
             }
+        }
+        if (have_frame && !keyframes_only) {
+            break;
         }
     }
     if (!have_frame) {
@@ -744,7 +753,24 @@ Result<std::vector<unsigned char>> extract_thumbnail_jpeg(
     }
     auto frame = decode_representative_frame(format, stream.value());
     if (!frame) {
-        return frame.error();
+        // The keyframe walk found nothing (common when the MP4 sync-sample
+        // table does not flag the IDR, or the 30% seek lands past the only
+        // keyframe). A seek on that demuxer does not rewind it, so reopen
+        // and take the first picture the decoder can produce.
+        const VaultError first_error = frame.error();
+        handle = open_format(reader);
+        if (!handle) {
+            return first_error;
+        }
+        format = handle.value().format.get();
+        stream = find_video_stream(format);
+        if (!stream) {
+            return first_error;
+        }
+        frame = decode_representative_frame(format, stream.value(), false);
+        if (!frame) {
+            return frame.error();
+        }
     }
     auto dimensions = scaled_dimensions(
         static_cast<std::uint32_t>(frame.value()->width),

@@ -46,7 +46,8 @@ class MainActivity : ComponentActivity() {
                         is Screen.Player -> Screen.Vault
                         is Screen.Image -> Screen.Vault
                         is Screen.Vault -> {
-                            runCatching { CoreBridge.nativeLock() }
+                            if (RemoteVault.connected()) RemoteVault.disconnect()
+                            else runCatching { CoreBridge.nativeLock() }
                             GalleryCache.clear()
                             Screen.Login
                         }
@@ -69,24 +70,29 @@ class MainActivity : ComponentActivity() {
                             onBack = { screen = Screen.Setup },
                         )
                         is Screen.Vault -> VaultScreen(
-                            vaultLocation = vaultRoot,
+                            vaultLocation = RemoteVault.label() ?: vaultRoot,
                             onLock = {
-                                runCatching { CoreBridge.nativeLock() }
+                                if (RemoteVault.connected()) RemoteVault.disconnect()
+                                else runCatching { CoreBridge.nativeLock() }
                                 screen = Screen.Login
                             },
                             // A still image has no stream to play, so it opens in
                             // the image viewer; everything else in the player.
-                            onPlay = { id, name ->
+                            onPlay = { id, name, playlist ->
                                 screen = if (isImageName(name)) {
                                     Screen.Image(id, name)
                                 } else {
-                                    Screen.Player(id, name)
+                                    val playable = playlist
+                                        .filter { !isImageName(it.name) }
+                                        .map { PlayItem(it.id, it.name) }
+                                    Screen.Player(id, name, playable)
                                 }
                             },
                         )
                         is Screen.Player -> PlayerScreen(
                             videoId = current.videoId,
                             name = current.name,
+                            playlist = current.playlist,
                             onBack = { screen = Screen.Vault },
                         )
                         is Screen.Image -> ImageViewerScreen(
@@ -101,6 +107,7 @@ class MainActivity : ComponentActivity() {
     }
 
     override fun onDestroy() {
+        RemoteVault.disconnect()
         runCatching { CoreBridge.nativeClose() }
         super.onDestroy()
     }

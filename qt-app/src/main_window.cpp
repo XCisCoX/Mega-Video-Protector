@@ -2,6 +2,7 @@
 #include "videovault/app/main_window.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
+#include "videovault/app/share_server.hpp"
 #include "videovault/core/vault.hpp"
 
 #include <QtConcurrent/QtConcurrentRun>
@@ -189,6 +190,8 @@ MainWindow::MainWindow(QWidget* parent)
         // Never auto-lock in the middle of an import/restore/remove batch:
         // lock() blocks on the vault mutex a worker currently holds and the
         // batch would fail with "vault is locked".
+        // A running share keeps its own vault, so locking this window does
+        // not cut the phone off. Skip only while a batch holds the UI vault.
         if (!batchBusy_) {
             lockVault();
         }
@@ -231,6 +234,10 @@ MainWindow::MainWindow(QWidget* parent)
 
 MainWindow::~MainWindow() {
     qApp->removeEventFilter(this);
+    if (shareServer_) {
+        shareServer_->setOnRunning({});
+        shareServer_.reset();
+    }
     // The player is an unparented top-level window (so it can be covered by
     // the main window), so close it explicitly to stop its worker thread
     // before the vault goes away.
@@ -415,11 +422,16 @@ QWidget* MainWindow::buildUnlockedPage() {
     importFolderButton_ = new QPushButton(QStringLiteral("Import folder…"), toolbar);
     importFolderButton_->setToolTip(QStringLiteral(
         "Import every video file from a folder (and drop files here to import)"));
+    shareButton_ = new QPushButton(QStringLiteral("Share"), toolbar);
+    shareButton_->setToolTip(QStringLiteral(
+        "Share this vault on Wi-Fi. The phone must enter the vault password. "
+        "Locking this PC does not stop sharing."));
     settingsButton_ = new QPushButton(QStringLiteral("Settings…"), toolbar);
     settingsButton_->setToolTip(QStringLiteral(
         "Change the password, manage tags, and adjust player settings"));
     auto* lockButton = new QPushButton(QStringLiteral("Lock"), toolbar);
-    lockButton->setToolTip(QStringLiteral("Lock the vault"));
+    lockButton->setToolTip(QStringLiteral(
+        "Lock this PC. A phone that already entered the password keeps access until you stop sharing."));
     lockButton->setFlat(true);
 
     toolbarLayout->addWidget(viewModeCombo_);
@@ -428,6 +440,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     toolbarLayout->addStretch(1);
     toolbarLayout->addWidget(importButton_);
     toolbarLayout->addWidget(importFolderButton_);
+    toolbarLayout->addWidget(shareButton_);
     toolbarLayout->addWidget(settingsButton_);
     toolbarLayout->addWidget(lockButton);
     layout->addWidget(toolbar);
@@ -495,6 +508,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
     connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
     connect(importFolderButton_, &QPushButton::clicked, this, [this] { beginImportFolder(); });
+    connect(shareButton_, &QPushButton::clicked, this, [this] { openShare(); });
     connect(settingsButton_, &QPushButton::clicked, this, [this] { openSettings(); });
     connect(viewModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](const int index) { setViewMode(index); });
@@ -1288,8 +1302,16 @@ void MainWindow::refreshGallery() {
                     }
                 });
             thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
+                auto stored = vault->thumbnail(video_id);
+                // Import stores a thumbnail only when generation succeeded.
+                // Clips whose keyframe index hid the only IDR were saved with
+                // none; build one now so the gallery fills in without a
+                // manual "Regenerate thumbnail".
+                if (!stored || stored.value().bytes.empty()) {
+                    stored = vault->generate_thumbnail(video_id, 320U);
+                }
                 return std::make_shared<core::Result<core::ThumbnailInfo>>(
-                    vault->thumbnail(video_id));
+                    std::move(stored));
             }));
 
             // Media metadata for the details columns, asynchronously.
@@ -1601,8 +1623,31 @@ void MainWindow::showUnlocked() {
     refreshGallery();
 }
 
+void MainWindow::openShare() {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    if (!shareServer_) {
+        shareServer_ = std::make_unique<ShareServer>();
+        shareServer_->setOnRunning([this](bool sharing) {
+            if (shareButton_ != nullptr) {
+                shareButton_->setText(sharing ? QStringLiteral("Sharing…") : QStringLiteral("Share"));
+            }
+        });
+    }
+    if (!shareServer_->running()) {
+        QString error;
+        if (!shareServer_->start(vault_->root_path(), &error)) {
+            QMessageBox::warning(this, QStringLiteral("Share with phone"), error);
+            return;
+        }
+    }
+    shareServer_->showDialog(this);
+}
+
 void MainWindow::lockVault() {
     autoLockTimer_->stop();
+    // Sharing stays up. The phone keeps its own unlocked vault until Stop sharing.
     std::filesystem::path root;
     if (vault_) {
         root = vault_->root_path();

@@ -119,7 +119,7 @@ const char* kIconButtonStyle =
 // Still-image codecs (FFmpeg demuxes jpg/png/... as single-frame "videos").
 bool is_image_codec(const std::string& codec_name) {
     static const std::vector<std::string> kImageCodecs{
-        "png", "mjpeg", "bmp", "webp", "gif", "tiff"};
+        "png", "apng", "mjpeg", "bmp", "webp", "gif", "tiff"};
     return std::find(kImageCodecs.begin(), kImageCodecs.end(), codec_name)
         != kImageCodecs.end();
 }
