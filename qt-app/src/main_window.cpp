@@ -8,7 +8,9 @@
 
 #include <QtConcurrent/QtConcurrentRun>
 
+#include <QAction>
 #include <QAbstractButton>
+#include <QButtonGroup>
 #include <QApplication>
 #include <QComboBox>
 #include <QDialog>
@@ -21,11 +23,13 @@
 #include <QFileDialog>
 #include <QFormLayout>
 #include <QFont>
+#include <QFontMetrics>
 #include <QFrame>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QKeyEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
 #include <QLineEdit>
@@ -143,9 +147,11 @@ void layoutInstagramGrid(QListWidget* list) {
     if (list == nullptr || list->viewMode() != QListView::IconMode) {
         return;
     }
-    const int columns = 3;
-    const int width = std::max(columns, list->viewport()->width());
-    const int cell = std::max(48, width / columns);
+    // Phone tiles are about a third of a narrow screen. On the desktop that
+    // same size means more columns, not three giant squares.
+    const int width = std::max(1, list->viewport()->width());
+    const int columns = std::max(5, width / 124);
+    const int cell = std::max(72, width / columns);
     if (list->gridSize() == QSize(cell, cell)) {
         return;
     }
@@ -161,6 +167,54 @@ public:
     void paint(QPainter* painter, const QStyleOptionViewItem& option,
         const QModelIndex& index) const override {
         const auto* view = qobject_cast<const QListView*>(option.widget);
+        if (view != nullptr && view->viewMode() == QListView::ListMode) {
+            painter->save();
+            painter->setRenderHint(QPainter::SmoothPixmapTransform, true);
+            const QRect row = option.rect;
+            const bool selected = option.state.testFlag(QStyle::State_Selected);
+            const bool hovered = option.state.testFlag(QStyle::State_MouseOver);
+            if (selected) {
+                painter->fillRect(row, QColor(51, 144, 236, 70));
+            } else if (hovered) {
+                painter->fillRect(row, QColor(255, 255, 255, 16));
+            }
+            const QRect thumb(row.left() + 14, row.top() + (row.height() - 44) / 2, 44, 44);
+            painter->fillRect(thumb, QColor(28, 28, 30));
+            const QPixmap source = index.data(Qt::UserRole + 4).value<QPixmap>();
+            if (!source.isNull()) {
+                const QPixmap scaled = source.scaled(
+                    thumb.size(), Qt::KeepAspectRatioByExpanding, Qt::SmoothTransformation);
+                const int cropX = std::max(0, (scaled.width() - thumb.width()) / 2);
+                const int cropY = std::max(0, (scaled.height() - thumb.height()) / 2);
+                painter->drawPixmap(thumb, scaled, QRect(cropX, cropY, thumb.width(), thumb.height()));
+            }
+            const int textLeft = thumb.right() + 12;
+            const QRect textRect(textLeft, row.top() + 8, row.width() - textLeft - 16, row.height() - 16);
+            QFont nameFont(QStringLiteral("Segoe UI"));
+            nameFont.setPointSize(10);
+            painter->setFont(nameFont);
+            const QString name = index.data(Qt::UserRole + 1).toString();
+            const QFontMetrics nameMetrics(nameFont);
+            painter->setPen(Qt::white);
+            painter->drawText(
+                QRect(textRect.left(), textRect.top(), textRect.width(), nameMetrics.height()),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                nameMetrics.elidedText(name, Qt::ElideRight, textRect.width()));
+            const QString sizeText = index.data(Qt::UserRole + 5).toString();
+            const QString tags = index.data(Qt::UserRole + 2).toString();
+            const QString meta = tags.isEmpty() ? sizeText : QStringLiteral("%1  ·  %2").arg(sizeText, tags);
+            QFont metaFont(QStringLiteral("Segoe UI"));
+            metaFont.setPointSize(9);
+            painter->setFont(metaFont);
+            const QFontMetrics metaMetrics(metaFont);
+            painter->setPen(QColor(142, 142, 147));
+            painter->drawText(
+                QRect(textRect.left(), textRect.bottom() - metaMetrics.height(), textRect.width(), metaMetrics.height()),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                metaMetrics.elidedText(meta, Qt::ElideRight, textRect.width()));
+            painter->restore();
+            return;
+        }
         if (view == nullptr || view->viewMode() != QListView::IconMode) {
             QStyledItemDelegate::paint(painter, option, index);
             return;
@@ -206,6 +260,9 @@ public:
 
     QSize sizeHint(const QStyleOptionViewItem& option, const QModelIndex& index) const override {
         const auto* view = qobject_cast<const QListView*>(option.widget);
+        if (view != nullptr && view->viewMode() == QListView::ListMode) {
+            return QSize(std::max(1, option.rect.width()), 62);
+        }
         if (view != nullptr && view->viewMode() == QListView::IconMode
             && view->gridSize().isValid()) {
             return view->gridSize();
@@ -218,11 +275,24 @@ class IconGrid final : public QListWidget {
 public:
     using QListWidget::QListWidget;
 
+    void setChromeInset(const int top, const int bottom) {
+        if (chromeTop_ == top && chromeBottom_ == bottom) {
+            return;
+        }
+        chromeTop_ = top;
+        chromeBottom_ = bottom;
+        setViewportMargins(0, top, 0, bottom);
+    }
+
 protected:
     void resizeEvent(QResizeEvent* event) override {
         QListWidget::resizeEvent(event);
         layoutInstagramGrid(this);
     }
+
+private:
+    int chromeTop_{-1};
+    int chromeBottom_{-1};
 };
 
 enum class CaptionGlyph { Minimize, Maximize, Restore, Close };
@@ -231,7 +301,7 @@ class CaptionButton final : public QAbstractButton {
 public:
     explicit CaptionButton(const CaptionGlyph glyph, QWidget* parent = nullptr)
         : QAbstractButton(parent), glyph_(glyph) {
-        setFixedSize(46, 40);
+        setFixedSize(46, 32);
         setCursor(Qt::ArrowCursor);
         setFocusPolicy(Qt::NoFocus);
     }
@@ -247,12 +317,11 @@ protected:
 
     void paintEvent(QPaintEvent*) override {
         QPainter painter(this);
-        painter.setRenderHint(QPainter::Antialiasing, true);
         const bool close = glyph_ == CaptionGlyph::Close;
         if (underMouse()) {
-            painter.fillRect(rect(), close ? QColor(232, 17, 35) : QColor(255, 255, 255, 28));
+            painter.fillRect(rect(), close ? QColor(232, 17, 35) : QColor(255, 255, 255, 24));
         }
-        painter.setPen(QPen(Qt::white, 1.15, Qt::SolidLine, Qt::RoundCap, Qt::RoundJoin));
+        painter.setPen(QPen(Qt::white, 1.0));
         painter.setBrush(Qt::NoBrush);
         const QPointF center(width() / 2.0, height() / 2.0);
         switch (glyph_) {
@@ -341,7 +410,7 @@ MainWindow::MainWindow(QWidget* parent)
         | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint
         | Qt::WindowMaximizeButtonHint | Qt::WindowCloseButtonHint);
 #endif
-    resize(1020, 700);
+    resize(1080, 700);
     setMinimumSize(780, 520);
     setAcceptDrops(true); // drag & drop video import
 
@@ -426,6 +495,37 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (galleryStack_ != nullptr && watched == galleryStack_->parentWidget()
+        && event->type() == QEvent::Resize) {
+        layoutLibraryChrome();
+    }
+    if (event->type() == QEvent::KeyPress && vault_ && vault_->is_unlocked()) {
+        const auto* key = static_cast<QKeyEvent*>(event);
+        if ((key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter)
+            && key->modifiers() == Qt::NoModifier) {
+            QWidget* focus = QApplication::focusWidget();
+            bool inGallery = false;
+            for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+                if (qobject_cast<QLineEdit*>(widget) != nullptr
+                    || qobject_cast<QComboBox*>(widget) != nullptr
+                    || qobject_cast<QPushButton*>(widget) != nullptr) {
+                    inGallery = false;
+                    break;
+                }
+                if (widget == detailsTree_ || widget == iconList_) {
+                    inGallery = true;
+                    break;
+                }
+            }
+            if (inGallery) {
+                const std::int64_t videoId = selectedVideoId();
+                if (videoId >= 0) {
+                    beginPlayback(videoId);
+                    return true;
+                }
+            }
+        }
+    }
     if (vault_ && vault_->is_unlocked()) {
         switch (event->type()) {
         case QEvent::KeyPress:
@@ -442,9 +542,14 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
 }
 
 void MainWindow::changeEvent(QEvent* event) {
-    if (event->type() == QEvent::WindowStateChange && captionMax_ != nullptr) {
-        static_cast<CaptionButton*>(captionMax_)->setGlyph(
-            isMaximized() ? CaptionGlyph::Restore : CaptionGlyph::Maximize);
+    if (event->type() == QEvent::WindowStateChange) {
+        if (captionBar_ != nullptr) {
+            captionBar_->setVisible(!isFullScreen());
+        }
+        if (captionMax_ != nullptr) {
+            static_cast<CaptionButton*>(captionMax_)->setGlyph(
+                isMaximized() ? CaptionGlyph::Restore : CaptionGlyph::Maximize);
+        }
     }
     QMainWindow::changeEvent(event);
 }
@@ -459,8 +564,10 @@ void MainWindow::showEvent(QShowEvent* event) {
         LONG_PTR style = GetWindowLongPtr(hwnd, GWL_STYLE);
         style |= WS_THICKFRAME | WS_CAPTION | WS_MAXIMIZEBOX | WS_MINIMIZEBOX | WS_SYSMENU;
         SetWindowLongPtr(hwnd, GWL_STYLE, style);
-        const MARGINS shadow{1, 1, 1, 1};
+        const MARGINS shadow{0, 0, 0, 1};
         DwmExtendFrameIntoClientArea(hwnd, &shadow);
+        const int corner = 2; // DWMWCP_ROUND, Windows 11
+        DwmSetWindowAttribute(hwnd, 33, &corner, sizeof(corner));
         SetWindowPos(hwnd, nullptr, 0, 0, 0, 0,
             SWP_FRAMECHANGED | SWP_NOMOVE | SWP_NOSIZE | SWP_NOZORDER | SWP_NOACTIVATE);
     }
@@ -472,39 +579,49 @@ bool MainWindow::nativeEvent(const QByteArray& eventType, void* message, long* r
     if (eventType == "windows_generic_MSG") {
         auto* msg = static_cast<MSG*>(message);
         if (msg->message == WM_NCCALCSIZE && msg->wParam == TRUE) {
-            if (isMaximized()) {
+            // The system hands a maximized window a rect that spills past the
+            // monitor. Inset it by the frame so it sits on the work area
+            // instead of sliding under the taskbar or leaving a gap.
+            if (IsZoomed(msg->hwnd)) {
                 auto* params = reinterpret_cast<NCCALCSIZE_PARAMS*>(msg->lParam);
-                HMONITOR monitor = MonitorFromWindow(msg->hwnd, MONITOR_DEFAULTTONEAREST);
-                MONITORINFO info{};
-                info.cbSize = sizeof(MONITORINFO);
-                if (GetMonitorInfo(monitor, &info)) {
-                    params->rgrc[0] = info.rcWork;
-                }
+                const int pad = GetSystemMetrics(SM_CXFRAME) + GetSystemMetrics(SM_CXPADDEDBORDER);
+                params->rgrc[0].left += pad;
+                params->rgrc[0].top += pad;
+                params->rgrc[0].right -= pad;
+                params->rgrc[0].bottom -= pad;
             }
             *result = 0;
             return true;
         }
         if (msg->message == WM_NCHITTEST) {
-            const QPoint pos = mapFromGlobal(QPoint(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam)));
-            constexpr int border = 6;
-            if (!isMaximized()) {
+            const QPoint global(GET_X_LPARAM(msg->lParam), GET_Y_LPARAM(msg->lParam));
+            const QPoint pos = mapFromGlobal(global);
+            const bool zoomed = IsZoomed(msg->hwnd);
+            // Buttons win over the resize border, or the close control cannot be clicked.
+            if (captionBar_ != nullptr) {
+                const QPoint inCaption = captionBar_->mapFromGlobal(global);
+                if (captionBar_->rect().contains(inCaption)) {
+                    QWidget* child = captionBar_->childAt(inCaption);
+                    if (qobject_cast<QAbstractButton*>(child) != nullptr) {
+                        *result = HTCLIENT;
+                    } else if (!zoomed && inCaption.y() < 4) {
+                        *result = HTTOP;
+                    } else {
+                        *result = HTCAPTION;
+                    }
+                    return true;
+                }
+            }
+            if (!zoomed) {
+                constexpr int border = 6;
                 const bool left = pos.x() < border;
                 const bool right = pos.x() >= width() - border;
-                const bool top = pos.y() < border;
                 const bool bottom = pos.y() >= height() - border;
-                if (top && left) { *result = HTTOPLEFT; return true; }
-                if (top && right) { *result = HTTOPRIGHT; return true; }
                 if (bottom && left) { *result = HTBOTTOMLEFT; return true; }
                 if (bottom && right) { *result = HTBOTTOMRIGHT; return true; }
                 if (left) { *result = HTLEFT; return true; }
                 if (right) { *result = HTRIGHT; return true; }
-                if (top) { *result = HTTOP; return true; }
                 if (bottom) { *result = HTBOTTOM; return true; }
-            }
-            if (captionBar_ != nullptr && captionBar_->geometry().contains(pos)) {
-                QWidget* child = captionBar_->childAt(captionBar_->mapFrom(this, pos));
-                *result = qobject_cast<QAbstractButton*>(child) != nullptr ? HTCLIENT : HTCAPTION;
-                return true;
             }
         }
         if (msg->message == WM_GETMINMAXINFO) {
@@ -526,22 +643,20 @@ void MainWindow::buildInterface() {
 
 #ifdef Q_OS_WIN
     captionBar_ = new QWidget(shell);
-    captionBar_->setFixedHeight(40);
+    captionBar_->setFixedHeight(32);
     captionBar_->setObjectName(QStringLiteral("captionBar"));
     captionBar_->setAttribute(Qt::WA_StyledBackground, true);
     captionBar_->setStyleSheet(QStringLiteral(
-        "QWidget#captionBar { background: #000000; border-bottom: 1px solid rgba(255, 255, 255, 22); }"
-        "QLabel#captionTitle { color: #ffffff; font-size: 13px; font-weight: 600; }"));
+        "QWidget#captionBar { background: #000000; border: none; }"));
     auto* captionLayout = new QHBoxLayout(captionBar_);
-    captionLayout->setContentsMargins(12, 0, 0, 0);
-    captionLayout->setSpacing(8);
-    auto* mark = new QLabel(captionBar_);
-    mark->setPixmap(QIcon(QStringLiteral(":/icons/app.png")).pixmap(16, 16));
-    mark->setAttribute(Qt::WA_TransparentForMouseEvents, true);
+    captionLayout->setContentsMargins(14, 0, 0, 0);
+    captionLayout->setSpacing(0);
     auto* captionTitle = new QLabel(QStringLiteral("Mega Video Protect"), captionBar_);
-    captionTitle->setObjectName(QStringLiteral("captionTitle"));
     captionTitle->setAttribute(Qt::WA_TransparentForMouseEvents, true);
-    captionLayout->addWidget(mark);
+    QFont captionFont(QStringLiteral("Segoe UI"));
+    captionFont.setPointSize(9);
+    captionTitle->setFont(captionFont);
+    captionTitle->setStyleSheet(QStringLiteral("color: rgba(255, 255, 255, 210); background: transparent;"));
     captionLayout->addWidget(captionTitle);
     captionLayout->addStretch(1);
     auto* minimize = new CaptionButton(CaptionGlyph::Minimize, captionBar_);
@@ -562,14 +677,16 @@ void MainWindow::buildInterface() {
     shellLayout->addWidget(captionBar_);
 #endif
 
-    pages_ = new QStackedWidget(shell);
+    contentStack_ = new QStackedWidget(shell);
+    pages_ = new QStackedWidget(contentStack_);
     setupPage_ = buildSetupPage();
     loginPage_ = buildLoginPage();
     unlockedPage_ = buildUnlockedPage();
     pages_->addWidget(setupPage_);
     pages_->addWidget(loginPage_);
     pages_->addWidget(unlockedPage_);
-    shellLayout->addWidget(pages_, 1);
+    contentStack_->addWidget(pages_);
+    shellLayout->addWidget(contentStack_, 1);
     setCentralWidget(shell);
 }
 
@@ -679,21 +796,20 @@ QWidget* MainWindow::buildLoginPage() {
 
 QWidget* MainWindow::buildUnlockedPage() {
     auto* page = new QWidget(this);
-    auto* layout = new QVBoxLayout(page);
-    layout->setContentsMargins(0, 0, 0, 0);
-    layout->setSpacing(0);
+    page->installEventFilter(this);
 
-    // Dark frosted command bar. It blurs the top of the gallery under it.
-    libraryTop_ = new FrostedBar(page);
+    // Translucent command bar. Icon and list views scroll underneath it.
+    libraryTop_ = new FrostedBar(FrostedBar::Band::Top, page);
     auto* toolbar = libraryTop_;
-    auto* toolbarLayout = new QHBoxLayout(toolbar);
-    toolbarLayout->setContentsMargins(12, 8, 12, 8);
+    auto* toolbarLayout = new QVBoxLayout(toolbar);
+    toolbarLayout->setContentsMargins(16, 10, 12, 10);
     toolbarLayout->setSpacing(8);
 
     viewModeCombo_ = new QComboBox(toolbar);
     viewModeCombo_->addItem(QStringLiteral("Details"));
     viewModeCombo_->addItem(QStringLiteral("Icons"));
     viewModeCombo_->addItem(QStringLiteral("List"));
+    viewModeCombo_->hide();
     tagFilterCombo_ = new QComboBox(toolbar);
     tagFilterCombo_->setMinimumWidth(150);
     searchEdit_ = new QLineEdit(toolbar);
@@ -717,16 +833,57 @@ QWidget* MainWindow::buildUnlockedPage() {
     lockButton->setToolTip(QStringLiteral(
         "Lock this PC. A phone that already entered the password keeps access until you stop sharing."));
 
-    toolbarLayout->addWidget(viewModeCombo_);
-    toolbarLayout->addWidget(tagFilterCombo_);
-    toolbarLayout->addWidget(searchEdit_);
-    toolbarLayout->addStretch(1);
-    toolbarLayout->addWidget(importButton_);
-    toolbarLayout->addWidget(importFolderButton_);
-    toolbarLayout->addWidget(shareButton_);
-    toolbarLayout->addWidget(settingsButton_);
-    toolbarLayout->addWidget(lockButton);
-    layout->addWidget(toolbar);
+    auto* titleRow = new QHBoxLayout();
+    titleRow->setSpacing(8);
+    auto* libraryTitle = new QLabel(QStringLiteral("Library"), toolbar);
+    QFont libraryFont(QStringLiteral("Segoe UI"));
+    libraryFont.setPointSize(16);
+    libraryTitle->setFont(libraryFont);
+    libraryTitle->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
+    titleRow->addWidget(libraryTitle);
+    titleRow->addStretch(1);
+    titleRow->addWidget(importButton_);
+    titleRow->addWidget(importFolderButton_);
+    titleRow->addWidget(shareButton_);
+    titleRow->addWidget(settingsButton_);
+    titleRow->addWidget(lockButton);
+    toolbarLayout->addLayout(titleRow);
+
+    searchEdit_->setPlaceholderText(QStringLiteral("Search"));
+    searchEdit_->setMinimumWidth(160);
+    auto* detailsMode = new QPushButton(QStringLiteral("Details"), toolbar);
+    auto* iconsMode = new QPushButton(QStringLiteral("Icons"), toolbar);
+    auto* listMode = new QPushButton(QStringLiteral("List"), toolbar);
+    viewModeGroup_ = new QButtonGroup(toolbar);
+    viewModeGroup_->setExclusive(true);
+    const QString modeStyle = QStringLiteral(
+        "QPushButton { min-height: 32px; padding: 0 12px; border-radius: 16px;"
+        " background: transparent; border: none; color: #8e8e93; }"
+        "QPushButton:checked { background: rgba(51, 144, 236, 90); color: white; }");
+    int modeId = 0;
+    for (auto* button : {detailsMode, iconsMode, listMode}) {
+        button->setCheckable(true);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setStyleSheet(modeStyle);
+        viewModeGroup_->addButton(button, modeId);
+        ++modeId;
+    }
+    sortButton_ = new QPushButton(toolbar);
+    sortButton_->setFocusPolicy(Qt::NoFocus);
+    sortButton_->setCursor(Qt::PointingHandCursor);
+    sortButton_->setStyleSheet(QStringLiteral(
+        "QPushButton { min-height: 32px; padding: 0 12px; border-radius: 16px;"
+        " background: transparent; border: none; color: #3390ec; }"));
+    auto* filterRow = new QHBoxLayout();
+    filterRow->setSpacing(8);
+    filterRow->addWidget(searchEdit_, 1);
+    filterRow->addWidget(detailsMode);
+    filterRow->addWidget(iconsMode);
+    filterRow->addWidget(listMode);
+    filterRow->addWidget(sortButton_);
+    filterRow->addWidget(tagFilterCombo_);
+    toolbarLayout->addLayout(filterRow);
 
     // Explorer-style gallery views fill the window.
     detailsTree_ = new QTreeWidget(page);
@@ -743,10 +900,6 @@ QWidget* MainWindow::buildUnlockedPage() {
     detailsTree_->setAcceptDrops(false);
     detailsTree_->header()->setStretchLastSection(true);
     detailsTree_->setSortingEnabled(true);
-    connect(detailsTree_->header(),
-        SIGNAL(sectionClicked(int)),
-        this,
-        SLOT(sortTree(int)));
     iconList_ = new IconGrid(page);
     iconList_->setObjectName(QStringLiteral("gallery"));
     iconList_->setItemDelegate(new InstagramDelegate(iconList_));
@@ -762,10 +915,8 @@ QWidget* MainWindow::buildUnlockedPage() {
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
     galleryStack_->addWidget(iconList_);
-    layout->addWidget(galleryStack_, 1);
 
-    // Path and counts sit on a dark blur of the bottom of the gallery.
-    libraryBottom_ = new FrostedBar(page);
+    libraryBottom_ = new FrostedBar(FrostedBar::Band::Bottom, page);
     auto* statusBar = libraryBottom_;
     auto* statusLayout = new QHBoxLayout(statusBar);
     statusLayout->setContentsMargins(12, 4, 12, 4);
@@ -786,7 +937,6 @@ QWidget* MainWindow::buildUnlockedPage() {
     statusLayout->addWidget(progressBar_);
     statusLayout->addWidget(statusCountLabel_);
     statusLayout->addWidget(galleryStatus_);
-    layout->addWidget(statusBar);
 
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
     connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
@@ -795,6 +945,31 @@ QWidget* MainWindow::buildUnlockedPage() {
     connect(settingsButton_, &QPushButton::clicked, this, [this] { openSettings(); });
     connect(viewModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](const int index) { setViewMode(index); });
+    connect(viewModeGroup_, QOverload<int>::of(&QButtonGroup::buttonClicked),
+        this, [this](const int index) {
+            if (viewModeCombo_->currentIndex() != index) {
+                viewModeCombo_->setCurrentIndex(index);
+            }
+        });
+    connect(sortButton_, &QPushButton::clicked, this, [this] {
+        QMenu menu(this);
+        const QStringList labels{
+            QStringLiteral("Name"), QStringLiteral("Size"), QStringLiteral("Duration"),
+            QStringLiteral("Resolution"), QStringLiteral("Codec"), QStringLiteral("Tags"),
+            QStringLiteral("Imported")};
+        for (int i = 0; i < labels.size(); ++i) {
+            QString text = labels.at(i);
+            if (i == sortKey_) {
+                text += sortAscending_ ? QStringLiteral("  ↑") : QStringLiteral("  ↓");
+            }
+            QAction* action = menu.addAction(text);
+            action->setData(i);
+        }
+        QAction* chosen = menu.exec(sortButton_->mapToGlobal(QPoint(0, sortButton_->height())));
+        if (chosen != nullptr) {
+            applyGallerySort(chosen->data().toInt());
+        }
+    });
     connect(tagFilterCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
         this, [this](int) {
             tagFilterId_ = tagFilterCombo_->currentData().toLongLong();
@@ -825,20 +1000,49 @@ QWidget* MainWindow::buildUnlockedPage() {
         });
 
     QSettings settings;
+    sortKey_ = settings.value(QStringLiteral("gallery/sortKey"), 0).toInt();
+    sortAscending_ = settings.value(QStringLiteral("gallery/sortAscending"), true).toBool();
+    if (sortKey_ < 0 || sortKey_ > 6) {
+        sortKey_ = 0;
+    }
+    updateSortButton();
     const int saved_view = settings.value(QStringLiteral("gallery/viewMode"), 1).toInt();
     viewModeCombo_->setCurrentIndex(saved_view);
     setViewMode(saved_view);
-    syncLibraryGlass();
+    layoutLibraryChrome();
     return page;
 }
 
-void MainWindow::syncLibraryGlass() {
-    if (libraryTop_ == nullptr || libraryBottom_ == nullptr || galleryStack_ == nullptr) {
+void MainWindow::layoutLibraryChrome() {
+    QWidget* page = galleryStack_ != nullptr ? galleryStack_->parentWidget() : nullptr;
+    if (page == nullptr || libraryTop_ == nullptr || libraryBottom_ == nullptr) {
         return;
     }
+    const int topHeight = std::max(libraryTop_->sizeHint().height(), 44);
+    const int bottomHeight = std::max(libraryBottom_->sizeHint().height(), 28);
+    const bool details = galleryStack_->currentWidget() == detailsTree_;
+    if (details) {
+        libraryTop_->setGeometry(0, 0, page->width(), topHeight);
+        libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
+        galleryStack_->setGeometry(
+            0, topHeight, page->width(), std::max(0, page->height() - topHeight - bottomHeight));
+    } else {
+        galleryStack_->setGeometry(page->rect());
+        libraryTop_->setGeometry(0, 0, page->width(), topHeight);
+        libraryBottom_->setGeometry(0, std::max(0, page->height() - bottomHeight), page->width(), bottomHeight);
+        galleryStack_->lower();
+    }
+    libraryTop_->raise();
+    libraryBottom_->raise();
+    // Keep the first and last rows fully visible. The bars float over the
+    // gallery, so without this inset the top icons sit halfway underneath.
+    if (iconList_ != nullptr) {
+        static_cast<IconGrid*>(iconList_)->setChromeInset(
+            details ? 0 : topHeight, details ? 0 : bottomHeight);
+    }
     auto* area = qobject_cast<QAbstractScrollArea*>(galleryStack_->currentWidget());
-    libraryTop_->follow(area, FrostedBar::Band::Top);
-    libraryBottom_->follow(area, FrostedBar::Band::Bottom);
+    libraryTop_->follow(area);
+    libraryBottom_->follow(area);
 }
 
 void MainWindow::setViewMode(const int index) {
@@ -855,11 +1059,23 @@ void MainWindow::setViewMode(const int index) {
         break;
     default: // List
         iconList_->setViewMode(QListView::ListMode);
-        iconList_->setIconSize(QSize(32, 32));
+        iconList_->setIconSize(QSize(44, 44));
         iconList_->setGridSize(QSize());
-        iconList_->setSpacing(2);
+        iconList_->setSpacing(0);
+        iconList_->setUniformItemSizes(true);
         galleryStack_->setCurrentWidget(iconList_);
         break;
+    }
+    if (index == 1) {
+        iconList_->setUniformItemSizes(false);
+    }
+    if (sortButton_ != nullptr) {
+        sortButton_->setVisible(index != 0);
+    }
+    if (viewModeGroup_ != nullptr) {
+        if (QAbstractButton* button = viewModeGroup_->button(index)) {
+            button->setChecked(true);
+        }
     }
     // Large-icon cards carry a name + tags caption; rebuild the captions so
     // they match the mode that was just selected.
@@ -870,9 +1086,124 @@ void MainWindow::setViewMode(const int index) {
     // switch (Qt IconMode keeps the old scroll offset and item layout).
     iconList_->scrollToTop();
     iconList_->doItemsLayout();
-    syncLibraryGlass();
+    layoutLibraryChrome();
     QSettings settings;
     settings.setValue(QStringLiteral("gallery/viewMode"), index);
+}
+
+void MainWindow::updateSortButton() {
+    if (sortButton_ == nullptr) {
+        return;
+    }
+    const QStringList labels{
+        QStringLiteral("Name"), QStringLiteral("Size"), QStringLiteral("Duration"),
+        QStringLiteral("Resolution"), QStringLiteral("Codec"), QStringLiteral("Tags"),
+        QStringLiteral("Imported")};
+    const int key = std::clamp(sortKey_, 0, labels.size() - 1);
+    sortButton_->setText(QStringLiteral("%1  %2")
+        .arg(sortAscending_ ? QStringLiteral("↑") : QStringLiteral("↓"), labels.at(key)));
+}
+
+void MainWindow::applyGallerySort(const int key) {
+    if (sortKey_ == key) {
+        sortAscending_ = !sortAscending_;
+    } else {
+        sortKey_ = key;
+        sortAscending_ = true;
+    }
+    QSettings settings;
+    settings.setValue(QStringLiteral("gallery/sortKey"), sortKey_);
+    settings.setValue(QStringLiteral("gallery/sortAscending"), sortAscending_);
+    updateSortButton();
+    sortGalleryItems();
+}
+
+void MainWindow::sortGalleryItems() {
+    if (iconList_ == nullptr) {
+        return;
+    }
+    QList<qlonglong> selected;
+    for (auto* item : iconList_->selectedItems()) {
+        selected.append(item->data(Qt::UserRole).toLongLong());
+    }
+    const qlonglong currentId = iconList_->currentItem() == nullptr
+        ? -1
+        : iconList_->currentItem()->data(Qt::UserRole).toLongLong();
+    QList<QListWidgetItem*> items;
+    while (iconList_->count() > 0) {
+        items.append(iconList_->takeItem(0));
+    }
+    const int key = sortKey_;
+    const bool ascending = sortAscending_;
+    std::stable_sort(items.begin(), items.end(), [key, ascending](QListWidgetItem* left, QListWidgetItem* right) {
+        auto textCompare = [](const QString& a, const QString& b) {
+            return a.compare(b, Qt::CaseInsensitive);
+        };
+        auto numberCompare = [](const qlonglong a, const qlonglong b) {
+            return a < b ? -1 : (a > b ? 1 : 0);
+        };
+        int compared = 0;
+        switch (key) {
+        case 1:
+            compared = numberCompare(
+                left->data(Qt::UserRole + 6).toLongLong(),
+                right->data(Qt::UserRole + 6).toLongLong());
+            break;
+        case 2:
+            compared = numberCompare(
+                left->data(Qt::UserRole + 7).toLongLong(),
+                right->data(Qt::UserRole + 7).toLongLong());
+            break;
+        case 3:
+            compared = numberCompare(
+                left->data(Qt::UserRole + 8).toLongLong(),
+                right->data(Qt::UserRole + 8).toLongLong());
+            break;
+        case 4:
+            compared = textCompare(
+                left->data(Qt::UserRole + 11).toString(),
+                right->data(Qt::UserRole + 11).toString());
+            break;
+        case 5:
+            compared = textCompare(
+                left->data(Qt::UserRole + 2).toString(),
+                right->data(Qt::UserRole + 2).toString());
+            break;
+        case 6:
+            compared = numberCompare(
+                left->data(Qt::UserRole + 9).toLongLong(),
+                right->data(Qt::UserRole + 9).toLongLong());
+            break;
+        default:
+            compared = textCompare(
+                left->data(Qt::UserRole + 1).toString(),
+                right->data(Qt::UserRole + 1).toString());
+            break;
+        }
+        if (compared == 0) {
+            compared = numberCompare(
+                left->data(Qt::UserRole).toLongLong(),
+                right->data(Qt::UserRole).toLongLong());
+        }
+        if (!ascending) {
+            compared = -compared;
+        }
+        return compared < 0;
+    });
+    QListWidgetItem* currentItem = nullptr;
+    for (auto* item : items) {
+        iconList_->addItem(item);
+        const qlonglong id = item->data(Qt::UserRole).toLongLong();
+        if (selected.contains(id)) {
+            item->setSelected(true);
+        }
+        if (id == currentId) {
+            currentItem = item;
+        }
+    }
+    if (currentItem != nullptr) {
+        iconList_->setCurrentItem(currentItem);
+    }
 }
 
 void MainWindow::refreshTagFilter() {
@@ -1546,6 +1877,9 @@ void MainWindow::refreshGallery() {
             iconItem->setData(Qt::UserRole, static_cast<qlonglong>(video_id));
             iconItem->setData(Qt::UserRole + 1, name);
             iconItem->setData(Qt::UserRole + 2, tags_text);
+            iconItem->setData(Qt::UserRole + 5, size_text);
+            iconItem->setData(Qt::UserRole + 6, static_cast<qlonglong>(video.original_size));
+            iconItem->setData(Qt::UserRole + 9, static_cast<qlonglong>(video.imported_at));
             iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
             iconItem->setToolTip(QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
             arg(name).
@@ -1632,6 +1966,14 @@ void MainWindow::refreshGallery() {
                         if (duration > 500) {
                             iconItem->setData(Qt::UserRole + 3, durationText);
                         }
+                        iconItem->setData(Qt::UserRole + 7, static_cast<qlonglong>(duration));
+                        iconItem->setData(
+                            Qt::UserRole + 8,
+                            static_cast<qlonglong>(info.width) * static_cast<qlonglong>(info.height));
+                        iconItem->setData(Qt::UserRole + 11, QString::fromStdString(info.codec_name));
+                        if (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4) {
+                            sortGalleryItems();
+                        }
                     }
                     auto* treeItem = findTreeItemById(detailsTree_, video_id);
                     if (treeItem == nullptr) {
@@ -1654,10 +1996,10 @@ void MainWindow::refreshGallery() {
         } else if (visible.empty()) {
             setError(galleryStatus_, QStringLiteral("No videos match the current search or filter."));
         }
+        sortGalleryItems();
         statusCountLabel_->setText(QStringLiteral("%1 videos · %2 MB")
             .arg(visible.size())
             .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
-        syncLibraryGlass();
         watcher->deleteLater();
     });
     watcher->setFuture(QtConcurrent::run([vault] {
@@ -1684,27 +2026,150 @@ std::int64_t MainWindow::selectedVideoId() const {
     return item->data(Qt::UserRole).toLongLong();
 }
 
+void MainWindow::embedPlayer() {
+    if (playerWindow_ == nullptr || contentStack_ == nullptr) {
+        return;
+    }
+    playerWindow_->prepareDock();
+    if (contentStack_->indexOf(playerWindow_) < 0) {
+        contentStack_->addWidget(playerWindow_);
+    }
+    contentStack_->setCurrentWidget(playerWindow_);
+    playerWindow_->show();
+    playerWindow_->setFocus();
+}
+
+void MainWindow::popPlayer() {
+    if (playerWindow_ == nullptr || contentStack_ == nullptr) {
+        return;
+    }
+    contentStack_->removeWidget(playerWindow_);
+    contentStack_->setCurrentWidget(pages_);
+    playerWindow_->detach();
+}
+
+void MainWindow::restoreGalleryFocus() {
+    if (galleryStack_ == nullptr || contentStack_ == nullptr || pages_ == nullptr) {
+        return;
+    }
+    if (contentStack_->currentWidget() != pages_) {
+        return;
+    }
+    const bool details = galleryStack_->currentWidget() == detailsTree_;
+    QAbstractItemView* view = details
+        ? static_cast<QAbstractItemView*>(detailsTree_)
+        : static_cast<QAbstractItemView*>(iconList_);
+    if (view == nullptr) {
+        return;
+    }
+    if (!view->currentIndex().isValid() && view->model() != nullptr
+        && view->model()->rowCount() > 0) {
+        view->setCurrentIndex(view->model()->index(0, 0));
+    }
+    view->setFocus(Qt::OtherFocusReason);
+}
+
 void MainWindow::beginPlayback(const std::int64_t video_id) {
     if (!vault_ || !vault_->is_unlocked() || video_id < 0) {
         return;
     }
+    QString title = QStringLiteral("Video");
+    int index = 0;
+    int count = 0;
+    bool hasPrevious = false;
+    bool hasNext = false;
+    const bool details = galleryStack_ != nullptr && galleryStack_->currentWidget() == detailsTree_;
+    const int items = details
+        ? (detailsTree_ != nullptr ? detailsTree_->topLevelItemCount() : 0)
+        : (iconList_ != nullptr ? iconList_->count() : 0);
+    int found = -1;
+    for (int i = 0; i < items; ++i) {
+        const qlonglong id = details
+            ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole).toLongLong()
+            : iconList_->item(i)->data(Qt::UserRole).toLongLong();
+        if (id == video_id) {
+            found = i;
+            title = details
+                ? detailsTree_->topLevelItem(i)->text(0)
+                : iconList_->item(i)->data(Qt::UserRole + 1).toString();
+            break;
+        }
+    }
+    count = items;
+    if (found >= 0) {
+        index = found + 1;
+        hasPrevious = found > 0;
+        hasNext = found + 1 < items;
+    }
+    if (title.isEmpty()) {
+        title = QStringLiteral("Video");
+    }
+
+    auto applyClip = [&](PlayerWindow* window) {
+        window->presentClip(title, index, count, hasPrevious, hasNext);
+    };
     if (playerWindow_ != nullptr) {
-        playerWindow_->playVideo(vault_,video_id);
-        playerWindow_->raise();
-        playerWindow_->activateWindow();
+        playerWindow_->playVideo(vault_, video_id);
+        applyClip(playerWindow_);
+        if (playerWindow_->isDetached()) {
+            playerWindow_->raise();
+            playerWindow_->activateWindow();
+        } else {
+            embedPlayer();
+        }
         return;
     }
-    auto* window = new PlayerWindow(
-        vault_, video_id, QStringLiteral("Video"), nullptr);
+    auto* window = new PlayerWindow(vault_, video_id, title, contentStack_);
     window->setAttribute(Qt::WA_DeleteOnClose);
     connect(window, &QDialog::destroyed, this,
         [this, window] {
             if (playerWindow_ == window) {
                 playerWindow_ = nullptr;
             }
+            if (contentStack_ != nullptr && pages_ != nullptr) {
+                contentStack_->setCurrentWidget(pages_);
+            }
+            // The gallery was hidden while the player had the stack, so Qt
+            // cannot hand focus back to it. Put it back on the selected item.
+            QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
         });
+    connect(window, &PlayerWindow::detachRequested, this, [this] { popPlayer(); });
+    connect(window, &PlayerWindow::dockRequested, this, [this] { embedPlayer(); });
+    connect(window, &PlayerWindow::previousRequested, this, [this] { stepPlayback(-1); });
+    connect(window, &PlayerWindow::nextRequested, this, [this] { stepPlayback(1); });
+    connect(window, &PlayerWindow::playbackFinished, this, [this] { stepPlayback(1); });
     playerWindow_ = window;
-    window->show();
+    applyClip(window);
+    embedPlayer();
+}
+
+void MainWindow::stepPlayback(const int delta) {
+    if (playerWindow_ == nullptr || delta == 0) {
+        return;
+    }
+    const std::int64_t current = playerWindow_->videoId();
+    const bool details = galleryStack_ != nullptr && galleryStack_->currentWidget() == detailsTree_;
+    const int items = details
+        ? (detailsTree_ != nullptr ? detailsTree_->topLevelItemCount() : 0)
+        : (iconList_ != nullptr ? iconList_->count() : 0);
+    int found = -1;
+    for (int i = 0; i < items; ++i) {
+        const qlonglong id = details
+            ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole).toLongLong()
+            : iconList_->item(i)->data(Qt::UserRole).toLongLong();
+        if (id == current) {
+            found = i;
+            break;
+        }
+    }
+    const int target = found + delta;
+    if (found < 0 || target < 0 || target >= items) {
+        return;
+    }
+    const qlonglong nextId = details
+        ? detailsTree_->topLevelItem(target)->data(0, Qt::UserRole).toLongLong()
+        : iconList_->item(target)->data(Qt::UserRole).toLongLong();
+    beginPlayback(nextId);
 }
 
 void MainWindow::beginRemoveSelected() {

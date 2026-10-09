@@ -24,10 +24,13 @@
 #include <thread>
 #include <vector>
 
+class QAbstractButton;
 class QAudioFormat;
 class QComboBox;
+class QEvent;
 class QKeyEvent;
 class QMouseEvent;
+class QShowEvent;
 
 namespace videovault::app {
 
@@ -110,11 +113,12 @@ protected:
                 painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 painter.drawImage(QRectF(offset_, QSizeF(frame_.size()) * zoom_), frame_);
             } else {
+                // Grow and shrink with the window. Width and height stay in proportion.
                 const QSize fitted = frame_.size().scaled(size(), Qt::KeepAspectRatio);
                 const QRect target(
                     QPoint((width() - fitted.width()) / 2, (height() - fitted.height()) / 2),
                     fitted);
-                painter.setRenderHint(QPainter::SmoothPixmapTransform, false);
+                painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
                 painter.drawImage(target, frame_);
             }
             if (!overlayText_.isEmpty()) {
@@ -260,10 +264,26 @@ public:
         QWidget* parent = nullptr);
     ~PlayerWindow() override;
     void playVideo(std::shared_ptr<videovault::core::Vault> vault, std::int64_t video_id);
+    void presentClip(const QString& title, int index, int count, bool hasPrevious, bool hasNext);
+    std::int64_t videoId() const { return video_id_; }
+    // Plays inside the main window until the viewer is popped into its own window.
+    void prepareDock();
+    void detach();
+    bool isDetached() const { return detached_; }
+
+signals:
+    void detachRequested();
+    void dockRequested();
+    void previousRequested();
+    void nextRequested();
+    void playbackFinished();
 
 protected:
     void resizeEvent(QResizeEvent* event) override;
     void closeEvent(QCloseEvent* event) override;
+    void showEvent(QShowEvent* event) override;
+    void changeEvent(QEvent* event) override;
+    bool nativeEvent(const QByteArray& eventType, void* message, long* result) override;
     void keyPressEvent(QKeyEvent* event) override;
     void mouseDoubleClickEvent(QMouseEvent* event) override;
     bool eventFilter(QObject* watched, QEvent* event) override;
@@ -284,8 +304,9 @@ private:
     void showChrome();
     void hideChrome();
     void layoutChrome();
+    void updatePopIcon();
+    void applyDetachedFrame();
     void updateCenterButton();
-    void showVolumePopup();
     void enterImageMode();
     void zoomImage(double factor, const QPointF& cursor_pos);
     void resetImageFit();
@@ -305,16 +326,25 @@ private:
     // surface so the empty video area keeps its own mouse handling).
     QWidget* topOverlay_{nullptr};
     QLabel* titleLabel_{nullptr};
+    QLabel* indexLabel_{nullptr};
+    QLabel* captionTitle_{nullptr};
+    QWidget* windowCaption_{nullptr};
+    QAbstractButton* windowMax_{nullptr};
+    QPushButton* popButton_{nullptr};
+    bool detached_{false};
+    bool frameReady_{false};
     QWidget* controlsOverlay_{nullptr};
     QPushButton* centerPlayButton_{nullptr};
     bool chromeVisible_{true};
     QPushButton* playButton_{nullptr};
+    QPushButton* previousButton_{nullptr};
+    QPushButton* nextButton_{nullptr};
+    QPushButton* backButton_{nullptr};
+    QPushButton* forwardButton_{nullptr};
     QSlider* positionSlider_{nullptr};
     QLabel* positionLabel_{nullptr};
     QPushButton* muteButton_{nullptr};
     QSlider* volumeSlider_{nullptr};
-    QFrame* volumePopup_{nullptr};
-    QTimer volumeHideTimer_;
     QComboBox* cacheCombo_{nullptr};
     QPushButton* fullscreenButton_{nullptr};
     // Image-viewer chrome (shown instead of the playback row for images).
@@ -386,6 +416,8 @@ private:
     QPointF imageOffset_;
     QString title_;
     int volumePercent_{100};
+    int playbackEpoch_{0};
+    bool advanceArmed_{false};
     QImage lastFrame_;
 };
 

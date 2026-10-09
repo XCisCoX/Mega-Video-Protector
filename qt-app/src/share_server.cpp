@@ -1,18 +1,26 @@
 #include "videovault/app/share_server.hpp"
 #include "videovault/app/share_tls.hpp"
+#include "videovault/app/glass.hpp"
 
 #include "qrcodegen.hpp"
 #include "videovault/core/vault.hpp"
 
+#include <QClipboard>
 #include <QComboBox>
 #include <QDialog>
+#include <QFont>
+#include <QFrame>
+#include <QGuiApplication>
+#include <QHBoxLayout>
 #include <QHostAddress>
 #include <QImage>
 #include <QLabel>
+#include <QMouseEvent>
 #include <QNetworkInterface>
 #include <QPainter>
 #include <QPixmap>
 #include <QPushButton>
+#include <QShowEvent>
 #include <QRandomGenerator>
 #include <QSemaphore>
 #include <QTcpServer>
@@ -666,6 +674,90 @@ QImage qrImage(const QString& text) {
 
 } // namespace
 
+// Paints the code inside a fixed white card so the pixmap cannot grow over
+// the address row underneath it.
+class QrCard final : public QWidget {
+public:
+    explicit QrCard(QWidget* parent = nullptr)
+        : QWidget(parent) {
+        setFixedSize(320, 320);
+    }
+
+    void setCode(const QImage& image) {
+        image_ = image;
+        update();
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(Qt::white);
+        painter.drawRoundedRect(rect(), 18, 18);
+        if (image_.isNull()) {
+            return;
+        }
+        const QRect inner = rect().adjusted(22, 22, -22, -22);
+        const QImage scaled = image_.scaled(
+            inner.size(), Qt::KeepAspectRatio, Qt::FastTransformation);
+        painter.setClipRect(inner);
+        painter.drawImage(
+            QPoint(
+                inner.left() + (inner.width() - scaled.width()) / 2,
+                inner.top() + (inner.height() - scaled.height()) / 2),
+            scaled);
+    }
+
+private:
+    QImage image_;
+};
+
+// Same sheet as Settings: the library stays blurred behind it. Closing the
+// sheet leaves sharing running. Stop sharing is the only thing that ends it.
+class ShareSheet final : public QDialog {
+public:
+    explicit ShareSheet(QWidget* parent = nullptr)
+        : QDialog(parent) {
+        setWindowFlags(Qt::Dialog | Qt::FramelessWindowHint);
+        setAttribute(Qt::WA_TranslucentBackground);
+        setModal(false);
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::SmoothPixmapTransform, true);
+        if (!backdrop_.isNull()) {
+            painter.drawImage(rect(), backdrop_);
+        } else {
+            painter.fillRect(rect(), QColor(0, 0, 0));
+        }
+        painter.fillRect(rect(), QColor(0, 0, 0, 120));
+    }
+
+    void showEvent(QShowEvent* event) override {
+        QDialog::showEvent(event);
+        if (QWidget* host = parentWidget()) {
+            const QPoint origin = host->mapToGlobal(QPoint(0, 0));
+            setGeometry(QRect(origin, host->size()));
+            backdrop_ = frost(host->grab().toImage());
+            update();
+        }
+    }
+
+    void mousePressEvent(QMouseEvent* event) override {
+        if (childAt(event->pos()) == nullptr) {
+            close();
+            return;
+        }
+        QDialog::mousePressEvent(event);
+    }
+
+private:
+    QImage backdrop_;
+};
+
 ShareServer::ShareServer() = default;
 
 ShareServer::~ShareServer() {
@@ -768,68 +860,144 @@ void ShareServer::showDialog(QWidget* parent) {
         dialog_->activateWindow();
         return;
     }
-    auto* dialog = new QDialog(parent);
+    auto* dialog = new ShareSheet(parent);
     dialog->setAttribute(Qt::WA_DeleteOnClose);
-    dialog->setWindowTitle(QStringLiteral("Share with phone"));
-    dialog->setMinimumWidth(360);
+    dialog->setWindowTitle(QStringLiteral("Share"));
     dialog_ = dialog;
     QObject::connect(dialog, &QDialog::destroyed, parent, [this] {
         dialog_ = nullptr;
     });
 
-    auto* layout = new QVBoxLayout(dialog);
+    auto* outer = new QVBoxLayout(dialog);
+    outer->setContentsMargins(48, 48, 48, 48);
+    outer->addStretch(1);
+
+    auto* sheet = new QFrame(dialog);
+    sheet->setObjectName(QStringLiteral("shareSheet"));
+    sheet->setAttribute(Qt::WA_StyledBackground, true);
+    sheet->setFixedWidth(440);
+    sheet->setSizePolicy(QSizePolicy::Fixed, QSizePolicy::Minimum);
+    sheet->setStyleSheet(QStringLiteral(
+        "QFrame#shareSheet { background: #121214; border-radius: 18px; }"
+        "QFrame#shareAddress { background: #1c1c1e; border: none; border-radius: 12px; }"
+        "QFrame#shareSheet QComboBox {"
+        "  background: #1c1c1e; color: white; border: none; border-radius: 12px;"
+        "  min-height: 36px; padding: 0 12px; }"
+        "QFrame#shareSheet QComboBox QAbstractItemView {"
+        "  background: #1c1c1e; color: white; selection-background-color: #3390ec; }"
+        "QPushButton#shareDone { background: transparent; border: none; color: #3390ec; min-height: 32px; }"
+        "QPushButton#shareCopy { background: transparent; border: none; color: #3390ec; min-height: 32px; padding: 0 4px; }"
+        "QPushButton#shareStop { background: #2c1518; border: none; color: #ff6b6b; border-radius: 14px; min-height: 40px; }"));
+    auto* layout = new QVBoxLayout(sheet);
+    layout->setContentsMargins(22, 16, 22, 18);
+    layout->setSpacing(12);
+
+    auto* titleRow = new QHBoxLayout();
+    auto* title = new QLabel(QStringLiteral("Share"), sheet);
+    QFont titleFont(QStringLiteral("Segoe UI"));
+    titleFont.setPointSize(16);
+    title->setFont(titleFont);
+    title->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
+    auto* done = new QPushButton(QStringLiteral("Done"), sheet);
+    done->setObjectName(QStringLiteral("shareDone"));
+    done->setCursor(Qt::PointingHandCursor);
+    done->setFocusPolicy(Qt::NoFocus);
+    QFont doneFont(QStringLiteral("Segoe UI"));
+    doneFont.setPointSize(11);
+    done->setFont(doneFont);
+    titleRow->addWidget(title);
+    titleRow->addStretch(1);
+    titleRow->addWidget(done);
+    layout->addLayout(titleRow);
+
     auto* intro = new QLabel(QStringLiteral(
-        "Scan this code in Mega Video Protect on the phone, then enter this vault's password. "
-        "The phone checks this PC's certificate from the code, and the password travels inside TLS. "
-        "Locking this PC does not cut the phone off. Sharing ends when you tap Stop sharing. "
-        "The phone and this PC have to be on the same Wi-Fi. "
-        "If Windows asks, allow Mega Video Protect on private networks."), dialog);
+        "Scan with Mega Video Protect on your phone, then enter the vault password. "
+        "Use the same Wi-Fi. Locking this PC does not stop sharing."), sheet);
     intro->setWordWrap(true);
+    QFont bodyFont(QStringLiteral("Segoe UI"));
+    bodyFont.setPointSize(10);
+    intro->setFont(bodyFont);
+    intro->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
     layout->addWidget(intro);
 
-    auto* code = new QLabel(dialog);
-    code->setAlignment(Qt::AlignCenter);
-    layout->addWidget(code);
+    auto* code = new QrCard(sheet);
+    layout->addWidget(code, 0, Qt::AlignHCenter);
 
-    auto* address = new QLabel(dialog);
+    auto* addressBar = new QFrame(sheet);
+    addressBar->setObjectName(QStringLiteral("shareAddress"));
+    addressBar->setAttribute(Qt::WA_StyledBackground, true);
+    addressBar->setFixedHeight(44);
+    auto* addressRow = new QHBoxLayout(addressBar);
+    addressRow->setContentsMargins(14, 0, 10, 0);
+    addressRow->setSpacing(8);
+    auto* address = new QLabel(addressBar);
     address->setTextInteractionFlags(Qt::TextSelectableByMouse);
-    address->setAlignment(Qt::AlignCenter);
-    layout->addWidget(address);
+    address->setFont(bodyFont);
+    address->setStyleSheet(QStringLiteral("color: white; background: transparent;"));
+    auto* copy = new QPushButton(QStringLiteral("Copy"), addressBar);
+    copy->setObjectName(QStringLiteral("shareCopy"));
+    copy->setCursor(Qt::PointingHandCursor);
+    copy->setFocusPolicy(Qt::NoFocus);
+    copy->setAutoDefault(false);
+    copy->setDefault(false);
+    copy->setFont(bodyFont);
+    addressRow->addWidget(address, 1);
+    addressRow->addWidget(copy);
+    layout->addWidget(addressBar);
 
     const QStringList available = hosts();
-    auto* hostBox = new QComboBox(dialog);
+    auto* hostBox = new QComboBox(sheet);
+    hostBox->setFont(bodyFont);
     if (available.isEmpty()) {
-        hostBox->addItem(QStringLiteral("No network address"));
-        hostBox->setEnabled(false);
+        hostBox->hide();
+        code->hide();
+        addressBar->hide();
         intro->setText(QStringLiteral(
             "This PC has no network address. Connect it to Wi-Fi, then open Share again."));
     } else {
         hostBox->addItems(available);
+        hostBox->setVisible(available.size() > 1);
     }
     layout->addWidget(hostBox);
 
-    const auto refresh = [this, code, address, hostBox] {
+    auto currentLink = std::make_shared<QString>();
+    const auto refresh = [this, code, address, hostBox, currentLink] {
         const QString host = hostBox->currentText();
-        if (!running() || host.isEmpty() || host.startsWith(QStringLiteral("No network"))) {
-            code->clear();
+        if (!running() || host.isEmpty()) {
+            code->setCode(QImage());
             address->clear();
+            currentLink->clear();
             return;
         }
-        const QString link = linkFor(host);
-        code->setPixmap(QPixmap::fromImage(qrImage(link)));
+        *currentLink = linkFor(host);
+        code->setCode(qrImage(*currentLink));
         address->setText(QStringLiteral("%1:%2").arg(host).arg(port_));
     };
     QObject::connect(hostBox, &QComboBox::currentTextChanged, dialog, [refresh](const QString&) { refresh(); });
     refresh();
 
-    auto* stop = new QPushButton(QStringLiteral("Stop sharing"), dialog);
-    QObject::connect(stop, &QPushButton::clicked, dialog, [this, dialog] {
-        dialog_ = nullptr;
-        this->stop();
-        dialog->close();
+    QObject::connect(copy, &QPushButton::clicked, dialog, [currentLink, copy] {
+        if (currentLink->isEmpty()) {
+            return;
+        }
+        QGuiApplication::clipboard()->setText(*currentLink);
+        copy->setText(QStringLiteral("Copied"));
     });
+    QObject::connect(done, &QPushButton::clicked, dialog, &QDialog::close);
+
+    auto* stop = new QPushButton(QStringLiteral("Stop sharing"), sheet);
+    stop->setObjectName(QStringLiteral("shareStop"));
+    stop->setCursor(Qt::PointingHandCursor);
+    stop->setFocusPolicy(Qt::NoFocus);
+    stop->setFont(bodyFont);
+    QObject::connect(stop, &QPushButton::clicked, dialog, [this] { this->stop(); });
     layout->addWidget(stop);
+
+    outer->addWidget(sheet, 0, Qt::AlignHCenter);
+    outer->addStretch(1);
     dialog->show();
+    dialog->raise();
+    dialog->activateWindow();
 }
 
 } // namespace videovault::app

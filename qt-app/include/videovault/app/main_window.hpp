@@ -8,6 +8,7 @@
 #include <vector>
 
 class QAbstractButton;
+class QButtonGroup;
 class QComboBox;
 class QDragEnterEvent;
 class QShowEvent;
@@ -91,10 +92,17 @@ private:
     void beginGenerateThumbnail(const std::vector<std::int64_t>& ids = {});
     void finishGenerateThumbnail();
     void beginPlayback(std::int64_t video_id);
+    void stepPlayback(int delta);
+    void embedPlayer();
+    void popPlayer();
+    void restoreGalleryFocus();
     std::int64_t selectedVideoId() const;
     std::vector<std::int64_t> selectedVideoIds() const;
     void setViewMode(int index);
-    void syncLibraryGlass();
+    void applyGallerySort(int key);
+    void sortGalleryItems();
+    void updateSortButton();
+    void layoutLibraryChrome();
     void refreshTagFilter();
     void beginEditTags(const std::vector<std::int64_t>& video_ids);
     void finishEditTags();
@@ -111,6 +119,7 @@ private:
     QWidget* captionBar_{nullptr};
     QAbstractButton* captionMax_{nullptr};
     bool frameReady_{false};
+    QStackedWidget* contentStack_{nullptr};
     QStackedWidget* pages_{nullptr};
     QWidget* setupPage_{nullptr};
     QWidget* loginPage_{nullptr};
@@ -135,6 +144,10 @@ private:
     QPushButton* settingsButton_{nullptr};
     QPushButton* shareButton_{nullptr};
     QComboBox* viewModeCombo_{nullptr};
+    QButtonGroup* viewModeGroup_{nullptr};
+    QPushButton* sortButton_{nullptr};
+    int sortKey_{0};
+    bool sortAscending_{true};
     QComboBox* tagFilterCombo_{nullptr};
     QLineEdit* searchEdit_{nullptr};
     QStackedWidget* galleryStack_{nullptr};

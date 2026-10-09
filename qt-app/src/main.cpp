@@ -4,6 +4,7 @@
 
 #include <QApplication>
 #include <QCoreApplication>
+#include <QFont>
 #include <QIcon>
 #include <QString>
 
@@ -20,6 +21,9 @@ int main(int argc, char* argv[]) {
     // Window/taskbar icon on every platform (the .ico resource handles the
     // Explorer icon for the Windows exe itself).
     application.setWindowIcon(QIcon(QStringLiteral(":/icons/app.png")));
+    QFont appFont(QStringLiteral("Segoe UI"));
+    appFont.setPointSize(10);
+    application.setFont(appFont);
     application.setPalette(videovault::app::darkPalette());
     application.setStyleSheet(videovault::app::appStyleSheet());
 

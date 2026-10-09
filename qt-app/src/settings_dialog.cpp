@@ -7,10 +7,12 @@
 #include "videovault/app/glass.hpp"
 
 #include <QComboBox>
+#include <QFont>
 #include <QFrame>
 #include <QFutureWatcher>
 #include <QHBoxLayout>
 #include <QInputDialog>
+#include <QKeyEvent>
 #include <QLabel>
 #include <QLineEdit>
 #include <QListWidget>
@@ -64,6 +66,8 @@ SettingsDialog::SettingsDialog(
     done->setObjectName(QStringLiteral("sheetAction"));
     done->setCursor(Qt::PointingHandCursor);
     done->setFocusPolicy(Qt::NoFocus);
+    done->setAutoDefault(false);
+    done->setDefault(false);
     titleRow->addWidget(title);
     titleRow->addStretch(1);
     titleRow->addWidget(done);
@@ -104,6 +108,9 @@ SettingsDialog::SettingsDialog(
     changePasswordButton_ = new QPushButton(QStringLiteral("Change password"), securityBox);
     changePasswordButton_->setObjectName(QStringLiteral("sheetAction"));
     changePasswordButton_->setCursor(Qt::PointingHandCursor);
+    changePasswordButton_->setAutoDefault(false);
+    changePasswordButton_->setDefault(false);
+    changePasswordButton_->setFocusPolicy(Qt::NoFocus);
     securityLayout->addWidget(currentPassword_);
     securityLayout->addWidget(hairline(securityBox));
     securityLayout->addWidget(newPassword_);
@@ -134,6 +141,10 @@ SettingsDialog::SettingsDialog(
     addTagButton_ = new QPushButton(QStringLiteral("Add"), tagsBox);
     addTagButton_->setObjectName(QStringLiteral("sheetAction"));
     addTagButton_->setCursor(Qt::PointingHandCursor);
+    addTagButton_->setAutoDefault(false);
+    addTagButton_->setDefault(false);
+    addTagButton_->setFocusPolicy(Qt::NoFocus);
+    newTagEdit_->installEventFilter(this);
     addRow->addWidget(newTagEdit_, 1);
     addRow->addWidget(addTagButton_);
     tagsLayout->addWidget(tagList_);
@@ -150,6 +161,9 @@ SettingsDialog::SettingsDialog(
     regenerateButton_ = new QPushButton(QStringLiteral("Regenerate missing"), playbackBox);
     regenerateButton_->setObjectName(QStringLiteral("sheetAction"));
     regenerateButton_->setCursor(Qt::PointingHandCursor);
+    regenerateButton_->setAutoDefault(false);
+    regenerateButton_->setDefault(false);
+    regenerateButton_->setFocusPolicy(Qt::NoFocus);
     regenerateButton_->setToolTip(QStringLiteral(
         "Build thumbnails only for videos that do not have one yet"));
     playbackLayout->addWidget(regenerateButton_);
@@ -168,7 +182,6 @@ SettingsDialog::SettingsDialog(
     connect(changePasswordButton_, &QPushButton::clicked,
         this, [this] { beginPasswordChange(); });
     connect(addTagButton_, &QPushButton::clicked, this, [this] { addTag(); });
-    connect(newTagEdit_, &QLineEdit::returnPressed, this, [this] { addTag(); });
     connect(regenerateButton_, &QPushButton::clicked,
         this, [this] { beginRegenerateMissing(); });
     if (cacheCombo_ != nullptr) {
@@ -187,7 +200,7 @@ void SettingsDialog::paintEvent(QPaintEvent*) {
     } else {
         painter.fillRect(rect(), QColor(0, 0, 0));
     }
-    painter.fillRect(rect(), QColor(0, 0, 0, 150));
+    painter.fillRect(rect(), QColor(0, 0, 0, 120));
 }
 
 void SettingsDialog::showEvent(QShowEvent* event) {
@@ -216,6 +229,13 @@ void SettingsDialog::setStatus(const QString& message, const bool error) {
 }
 
 bool SettingsDialog::eventFilter(QObject* watched, QEvent* event) {
+    if (watched == newTagEdit_ && event->type() == QEvent::KeyPress) {
+        const auto* key = static_cast<const QKeyEvent*>(event);
+        if (key->key() == Qt::Key_Return || key->key() == Qt::Key_Enter) {
+            addTag();
+            return true;
+        }
+    }
     if (event->type() == QEvent::MouseButtonDblClick) {
         const auto id = watched->property("tagId");
         if (id.isValid()) {
@@ -244,25 +264,33 @@ void SettingsDialog::reloadTags() {
     for (const auto& tag : tags.value()) {
         const QString name = QString::fromStdString(tag.name);
         auto* item = new QListWidgetItem(tagList_);
-        item->setText(name);
+        item->setText(QString());
         item->setData(Qt::UserRole, static_cast<qulonglong>(tag.id));
-        item->setSizeHint(QSize(0, 40));
+        item->setData(Qt::UserRole + 1, name);
+        item->setSizeHint(QSize(0, 44));
         item->setToolTip(QStringLiteral("Double-click to rename. Videos: %1")
             .arg(tag.video_count));
         auto* row = new QWidget(tagList_);
         auto* rowLayout = new QHBoxLayout(row);
-        rowLayout->setContentsMargins(8, 0, 4, 0);
+        rowLayout->setContentsMargins(16, 0, 8, 0);
+        QFont nameFont(QStringLiteral("Segoe UI"));
+        nameFont.setPointSize(11);
+        QFont metaFont(QStringLiteral("Segoe UI"));
+        metaFont.setPointSize(10);
         auto* nameLabel = new QLabel(name, row);
-        nameLabel->setStyleSheet(QStringLiteral("color: #ffffff; font-size: 14px;"));
+        nameLabel->setFont(nameFont);
+        nameLabel->setStyleSheet(QStringLiteral("color: #ffffff; background: transparent;"));
         nameLabel->setProperty("tagId", static_cast<qulonglong>(tag.id));
         nameLabel->installEventFilter(this);
         auto* countLabel = new QLabel(QString::number(tag.video_count), row);
-        countLabel->setStyleSheet(QStringLiteral("color: #8e8e93; font-size: 13px;"));
+        countLabel->setFont(metaFont);
+        countLabel->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
         auto* remove = new QPushButton(QStringLiteral("Remove"), row);
+        remove->setFont(metaFont);
         remove->setCursor(Qt::PointingHandCursor);
         remove->setStyleSheet(QStringLiteral(
             "QPushButton { color: #ff453a; background: transparent; border: none;"
-            " min-height: 28px; padding: 0 8px; }"));
+            " padding: 0 8px; }"));
         remove->setFocusPolicy(Qt::NoFocus);
         remove->setToolTip(QStringLiteral("Remove tag"));
         rowLayout->addWidget(nameLabel, 1);
@@ -358,7 +386,7 @@ void SettingsDialog::renameSelectedTag() {
     const QString name = QInputDialog::getText(
         this, QStringLiteral("Rename tag"),
         QStringLiteral("New name:"),
-        QLineEdit::Normal, item->text(), &ok);
+        QLineEdit::Normal, item->data(Qt::UserRole + 1).toString(), &ok);
     if (!ok || name.trimmed().isEmpty()) {
         return;
     }

@@ -2,6 +2,7 @@
 
 package org.megavideoprotect.app
 
+import android.app.Activity
 import android.graphics.Bitmap
 import android.graphics.BitmapFactory
 import android.media.AudioAttributes
@@ -18,7 +19,9 @@ import androidx.compose.foundation.gestures.awaitEachGesture
 import androidx.compose.foundation.gestures.awaitFirstDown
 import androidx.compose.foundation.gestures.horizontalDrag
 import androidx.compose.foundation.gestures.waitForUpOrCancellation
+import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxHeight
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
@@ -46,6 +49,7 @@ import androidx.compose.runtime.withFrameNanos
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.draw.clip
+import androidx.compose.ui.graphics.Brush
 import androidx.compose.ui.graphics.Color
 import androidx.compose.ui.graphics.asImageBitmap
 import androidx.compose.ui.graphics.toArgb
@@ -53,6 +57,10 @@ import androidx.compose.foundation.layout.offset
 import androidx.compose.ui.input.pointer.pointerInput
 import androidx.compose.ui.layout.ContentScale
 import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.platform.LocalView
+import androidx.core.view.WindowCompat
+import androidx.core.view.WindowInsetsCompat
+import androidx.core.view.WindowInsetsControllerCompat
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.style.TextOverflow
 import androidx.compose.ui.unit.dp
@@ -67,6 +75,29 @@ import androidx.media3.ui.PlayerView
 import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.delay
 import kotlinx.coroutines.withContext
+
+@Composable
+private fun PlayerCircle(
+    label: String,
+    enabled: Boolean = true,
+    onClick: () -> Unit,
+) {
+    Box(
+        Modifier
+            .size(40.dp)
+            .clip(CircleShape)
+            .background(Color.Black.copy(alpha = if (enabled) 0.38f else 0.16f))
+            .border(1.dp, Color.White.copy(alpha = if (enabled) 0.22f else 0.08f), CircleShape)
+            .clickable(enabled = enabled, onClick = onClick),
+        contentAlignment = Alignment.Center,
+    ) {
+        Text(
+            label,
+            color = Color.White.copy(alpha = if (enabled) 1f else 0.35f),
+            fontSize = 18.sp,
+        )
+    }
+}
 
 /**
  * Full-screen vertical feed. Swipe up for the next video and down for the
@@ -106,6 +137,27 @@ fun PlayerScreen(
 
     val page = pagerState.settledPage
     val shown = items[page.coerceIn(0, items.lastIndex)]
+    val view = LocalView.current
+    var fullscreen by remember { mutableStateOf(false) }
+    DisposableEffect(fullscreen) {
+        val activity = view.context as? Activity
+        val window = activity?.window
+        if (window != null) {
+            val controller = WindowCompat.getInsetsController(window, view)
+            if (fullscreen) {
+                controller.hide(WindowInsetsCompat.Type.systemBars())
+                controller.systemBarsBehavior =
+                    WindowInsetsControllerCompat.BEHAVIOR_SHOW_TRANSIENT_BARS_BY_SWIPE
+            } else {
+                controller.show(WindowInsetsCompat.Type.systemBars())
+            }
+        }
+        onDispose {
+            val activity = view.context as? Activity ?: return@onDispose
+            WindowCompat.getInsetsController(activity.window, view)
+                .show(WindowInsetsCompat.Type.systemBars())
+        }
+    }
 
     LaunchedEffect(shown.id, failure) {
         if (failure != null && poster == null) {
@@ -317,38 +369,40 @@ fun PlayerScreen(
                         Text("▶", color = Color.White, fontSize = 28.sp)
                     }
                 }
-                Text(
-                    item.name,
-                    color = Color.White,
-                    fontSize = 14.sp,
-                    fontWeight = FontWeight.SemiBold,
-                    maxLines = 1,
-                    overflow = TextOverflow.Ellipsis,
-                    modifier = Modifier
-                        .align(Alignment.BottomStart)
-                        .navigationBarsPadding()
-                        .padding(start = 16.dp, end = 72.dp, bottom = 28.dp)
-                        .clip(RoundedCornerShape(14.dp))
-                        .background(Color.Black.copy(alpha = 0.38f))
-                        .border(1.dp, Color.White.copy(alpha = 0.18f), RoundedCornerShape(14.dp))
-                        .padding(horizontal = 12.dp, vertical = 7.dp),
-                )
             }
         }
 
         Box(
             Modifier
-                .align(Alignment.TopStart)
+                .align(Alignment.TopCenter)
+                .fillMaxWidth()
+                .height(108.dp)
+                .background(
+                    Brush.verticalGradient(
+                        listOf(Color.Black.copy(alpha = 0.55f), Color.Transparent),
+                    ),
+                ),
+        )
+        Row(
+            Modifier
+                .align(Alignment.TopCenter)
                 .statusBarsPadding()
-                .padding(12.dp)
-                .size(40.dp)
-                .clip(CircleShape)
-                .background(Color.Black.copy(alpha = 0.35f))
-                .border(1.dp, Color.White.copy(alpha = 0.22f), CircleShape)
-                .clickable(onClick = onBack),
-            contentAlignment = Alignment.Center,
+                .padding(horizontal = 12.dp, vertical = 10.dp)
+                .fillMaxWidth(),
+            verticalAlignment = Alignment.CenterVertically,
+            horizontalArrangement = Arrangement.spacedBy(10.dp),
         ) {
-            Text("‹", color = Color.White, fontSize = 28.sp)
+            PlayerCircle("‹", onClick = onBack)
+            Text(
+                shown.name,
+                color = Color.White,
+                fontSize = 16.sp,
+                fontWeight = FontWeight.SemiBold,
+                maxLines = 1,
+                overflow = TextOverflow.Ellipsis,
+                modifier = Modifier.weight(1f),
+            )
+            PlayerCircle(if (fullscreen) "↙" else "⛶", onClick = { fullscreen = !fullscreen })
         }
 
         val barDuration = if (loopDuration > 0L) loopDuration else duration
@@ -631,7 +685,7 @@ private fun ReelPoster(id: Long) {
             bitmap = image.asImageBitmap(),
             contentDescription = null,
             modifier = Modifier.fillMaxSize(),
-            contentScale = ContentScale.Crop,
+            contentScale = ContentScale.Fit,
         )
     }
 }
