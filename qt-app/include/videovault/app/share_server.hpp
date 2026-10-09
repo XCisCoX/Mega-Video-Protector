@@ -15,9 +15,10 @@ class Vault;
 
 namespace videovault::app {
 
-// Serves a vault to a phone on the same network. The QR code is only the
-// address. The phone sends the vault password, and a session token is issued
-// after that. Locking the PC window does not stop sharing. Stop sharing does.
+// Serves a vault to a phone on the same network. The QR code carries the
+// address and the SHA-256 of this session's TLS certificate. The phone sends
+// the vault password only after that certificate matches. Locking the PC
+// window does not stop sharing. Stop sharing does.
 class ShareServer {
 public:
     ShareServer();
@@ -50,6 +51,7 @@ private:
     std::shared_ptr<State> state_;
     ListenThread* thread_{nullptr};
     quint16 port_{0};
+    QString fingerprint_;
     std::function<void(bool)> onRunning_;
     QWidget* dialog_{nullptr};
 };

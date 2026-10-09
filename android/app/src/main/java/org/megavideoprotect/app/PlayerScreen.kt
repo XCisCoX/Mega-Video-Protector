@@ -58,7 +58,6 @@ import androidx.compose.ui.viewinterop.AndroidView
 import androidx.media3.common.MediaItem
 import androidx.media3.common.PlaybackException
 import androidx.media3.common.Player
-import androidx.media3.datasource.DefaultHttpDataSource
 import androidx.media3.exoplayer.ExoPlayer
 import androidx.media3.exoplayer.source.ProgressiveMediaSource
 import androidx.media3.ui.PlayerView
@@ -130,28 +129,11 @@ fun PlayerScreen(
     }
 
     DisposableEffect(items) {
-        val remote = RemoteVault.connected()
-        val factory = if (remote) {
-            DefaultHttpDataSource.Factory().apply {
-                setConnectTimeoutMs(8_000)
-                setReadTimeoutMs(60_000)
-                setAllowCrossProtocolRedirects(false)
-                setDefaultRequestProperties(
-                    mapOf("Authorization" to "Bearer ${RemoteVault.token.orEmpty()}"),
-                )
-            }
-        } else {
-            VaultDataSource.Factory()
-        }
         val exo = ExoPlayer.Builder(context)
-            .setMediaSourceFactory(ProgressiveMediaSource.Factory(factory))
+            .setMediaSourceFactory(ProgressiveMediaSource.Factory(VaultDataSource.Factory()))
             .build()
         exo.setMediaItems(
-            items.map { item ->
-                MediaItem.fromUri(
-                    if (remote) RemoteVault.fileUrl(item.id) else VaultDataSource.uriFor(item.id).toString(),
-                )
-            },
+            items.map { MediaItem.fromUri(VaultDataSource.uriFor(it.id)) },
             start,
             0L,
         )

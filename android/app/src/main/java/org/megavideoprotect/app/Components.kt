@@ -5,12 +5,15 @@ import androidx.compose.foundation.background
 import androidx.compose.foundation.border
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
+import androidx.compose.foundation.layout.BoxScope
 import androidx.compose.foundation.layout.Column
 import androidx.compose.foundation.layout.ColumnScope
 import androidx.compose.foundation.layout.PaddingValues
 import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.RowScope
 import androidx.compose.foundation.layout.Spacer
+import androidx.compose.foundation.layout.safeDrawingPadding
+import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.height
 import androidx.compose.foundation.layout.padding
@@ -21,6 +24,8 @@ import androidx.compose.material3.Button
 import androidx.compose.material3.ButtonDefaults
 import androidx.compose.material3.DropdownMenu
 import androidx.compose.material3.DropdownMenuItem
+import androidx.compose.material3.Icon
+import androidx.compose.material3.IconButton
 import androidx.compose.material3.OutlinedTextField
 import androidx.compose.material3.OutlinedTextFieldDefaults
 import androidx.compose.material3.Text
@@ -32,6 +37,8 @@ import androidx.compose.runtime.setValue
 import androidx.compose.ui.Alignment
 import androidx.compose.ui.Modifier
 import androidx.compose.ui.graphics.Color
+import androidx.compose.ui.platform.LocalContext
+import androidx.compose.ui.res.painterResource
 import androidx.compose.ui.text.TextStyle
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
@@ -181,6 +188,56 @@ fun MvpCombo(
                 )
             }
         }
+    }
+}
+
+internal const val ChooseFolder = "Choose a folder…"
+
+/** App-private and shared storage, with a folder picker as the other mode. */
+@Composable
+fun VaultPlaceField(
+    location: String,
+    options: List<String>,
+    enabled: Boolean,
+    onLocation: (String) -> Unit,
+    onChooseFolder: () -> Unit,
+    modifier: Modifier = Modifier,
+) {
+    val context = LocalContext.current
+    val standard = options.distinct()
+    MvpCombo(
+        selected = VaultLocation.shortName(context, location),
+        items = standard.map { VaultLocation.shortName(context, it) } + ChooseFolder,
+        onSelect = { label ->
+            if (label == ChooseFolder) {
+                onChooseFolder()
+            } else {
+                val index = standard.indexOfFirst { VaultLocation.shortName(context, it) == label }
+                if (index >= 0) onLocation(standard[index])
+            }
+        },
+        enabled = enabled,
+        modifier = modifier.fillMaxWidth(),
+    )
+}
+
+/** The scan mark, pinned to the top-right of the screen. */
+@Composable
+fun BoxScope.ScanCorner(enabled: Boolean, onClick: () -> Unit) {
+    IconButton(
+        onClick = onClick,
+        enabled = enabled,
+        modifier = Modifier
+            .align(Alignment.TopEnd)
+            .safeDrawingPadding()
+            .padding(end = 4.dp),
+    ) {
+        Icon(
+            painter = painterResource(R.drawable.ic_scan_qr),
+            contentDescription = "Scan",
+            tint = Mvp.title,
+            modifier = Modifier.size(26.dp),
+        )
     }
 }
 

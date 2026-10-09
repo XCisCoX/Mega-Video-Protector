@@ -24,6 +24,7 @@ set(MVP_APP_SOURCES
     src/settings_dialog.cpp
     src/batch_worker.cpp
     src/share_server.cpp
+    src/share_tls.cpp
     third_party/qrcodegen/qrcodegen.cpp
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
@@ -31,6 +32,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
+    include/videovault/app/share_tls.hpp
     resources/resources.qrc
 )
 
@@ -74,6 +76,9 @@ target_link_libraries(VideoVaultApp
         Qt5::MultimediaWidgets
         ${MVP_FFMPEG_LIBS}
 )
+if(WIN32)
+    target_link_libraries(VideoVaultApp PRIVATE crypt32 secur32)
+endif()
 
 target_compile_features(VideoVaultApp PRIVATE cxx_std_20)
 set_target_properties(VideoVaultApp PROPERTIES

@@ -1,5 +1,9 @@
 package org.megavideoprotect.app
 
+import android.Manifest
+import androidx.activity.compose.rememberLauncherForActivityResult
+import androidx.activity.result.contract.ActivityResultContracts
+import androidx.compose.foundation.clickable
 import androidx.compose.foundation.layout.Arrangement
 import androidx.compose.foundation.layout.Box
 import androidx.compose.foundation.layout.Column
@@ -7,8 +11,8 @@ import androidx.compose.foundation.layout.Row
 import androidx.compose.foundation.layout.fillMaxSize
 import androidx.compose.foundation.layout.fillMaxWidth
 import androidx.compose.foundation.layout.imePadding
-import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.padding
+import androidx.compose.foundation.layout.safeDrawingPadding
 import androidx.compose.foundation.layout.size
 import androidx.compose.foundation.layout.widthIn
 import androidx.compose.foundation.rememberScrollState
@@ -30,8 +34,7 @@ import kotlinx.coroutines.Dispatchers
 import kotlinx.coroutines.launch
 import kotlinx.coroutines.withContext
 
-/** Mirrors the desktop buildSetupPage(): title, description, location,
- *  password + confirmation, Argon2id profile, Create / Open existing. */
+/** Create a vault here, or scan the PC the same way as the unlock screen. */
 @Composable
 fun SetupScreen(
     vaultLocation: String,
@@ -42,13 +45,27 @@ fun SetupScreen(
     val context = LocalContext.current
     var location by remember { mutableStateOf(vaultLocation) }
     var showFolderPicker by remember { mutableStateOf(false) }
+    var scanning by remember { mutableStateOf(false) }
     var password by remember { mutableStateOf("") }
     var confirmation by remember { mutableStateOf("") }
-    // Same profiles as the desktop client (no phone-specific downgrade).
     var profile by remember { mutableStateOf("Balanced — 256 MiB, 3 iterations") }
     var error by remember { mutableStateOf<String?>(null) }
     var busy by remember { mutableStateOf(false) }
+    var checkingPc by remember { mutableStateOf(false) }
+    var pcCode by remember { mutableStateOf<String?>(null) }
     val scope = rememberCoroutineScope()
+    val standard = remember(locationOptions) { locationOptions.distinct() }
+
+    val cameraPermission = rememberLauncherForActivityResult(
+        ActivityResultContracts.RequestPermission()
+    ) { granted ->
+        if (granted) {
+            scanning = true
+            error = null
+        } else {
+            error = "Camera permission is needed to scan the PC."
+        }
+    }
 
     fun create() {
         if (password.length < 8) {
@@ -61,13 +78,8 @@ fun SetupScreen(
         }
         error = null
         busy = true
-        // A phone cannot afford the desktop profile: Argon2id at 256 MiB x 3
-        // took ~45 s to unlock on a Redmi Note 13 Pro, during which the UI looks
-        // frozen. The mobile profile keeps the same iteration count at 64 MiB
-        // (still far above OWASP's Argon2id floor) and unlocks in a few seconds.
         val memKib = when {
             profile.startsWith("High") -> 512 * 1024
-            profile.startsWith("Mobile") -> 64 * 1024
             else -> 256 * 1024
         }
         val iters = if (profile.startsWith("High")) 4 else 3
@@ -80,13 +92,46 @@ fun SetupScreen(
         }
     }
 
-    Box(Modifier.fillMaxSize(), contentAlignment = Alignment.Center) {
+    fun connect() {
+        val code = pcCode
+        if (code == null) return
+        if (password.isEmpty()) {
+            error = "Enter the vault password."
+            return
+        }
+        error = null
+        busy = true
+        checkingPc = true
+        scope.launch {
+            val failure = withContext(Dispatchers.IO) { RemoteVault.login(code, password) }
+            busy = false
+            checkingPc = false
+            if (failure == null) {
+                GalleryCache.clear()
+                onCreated()
+            } else {
+                error = failure
+            }
+        }
+    }
+
+    if (scanning) {
+        QrScanScreen(
+            onCode = { text ->
+                pcCode = text
+                scanning = false
+                error = null
+            },
+            onClose = { scanning = false },
+        )
+        return
+    }
+
+    Box(Modifier.fillMaxSize()) {
         Column(
             Modifier
                 .fillMaxSize()
                 .verticalScroll(rememberScrollState())
-                // Edge-to-edge activity: pad by the IME inset so the soft
-                // keyboard does not cover the Create vault button.
                 .safeDrawingPadding()
                 .imePadding()
                 .padding(24.dp),
@@ -94,46 +139,60 @@ fun SetupScreen(
             verticalArrangement = Arrangement.Center,
         ) {
             MvpCard(Modifier.widthIn(max = 420.dp).fillMaxWidth()) {
-                MvpTitle("Create your encrypted vault")
+                MvpTitle(if (pcCode == null) "Create your encrypted vault" else "Unlock")
                 MvpDescription(
-                    "Choose a private storage location and a strong password. " +
-                        "The password is never stored."
+                    if (pcCode == null) {
+                        "Choose where the vault lives and a strong password. The password is never stored."
+                    } else {
+                        "PC code ready. This password opens the shared vault."
+                    }
                 )
-                MvpDescription("Vault storage folder")
-                MvpCombo(
-                    selected = VaultLocation.label(context, location),
-                    items = locationOptions.map { VaultLocation.label(context, it) },
-                    onSelect = { label ->
-                        val index = locationOptions.map { VaultLocation.label(context, it) }.indexOf(label)
-                        if (index >= 0) {
-                            location = locationOptions[index]
-                            VaultLocation.save(context, location)
-                        }
-                    },
-                )
-                MvpButton(
-                    "Choose folder…",
-                    onClick = { showFolderPicker = true },
-                    enabled = !busy,
-                    modifier = Modifier.fillMaxWidth(),
-                )
+                if (pcCode != null) {
+                    Text(
+                        "Use this phone",
+                        color = Mvp.accent,
+                        fontSize = 13.sp,
+                        modifier = Modifier.clickable(enabled = !busy) {
+                            pcCode = null
+                            error = null
+                        },
+                    )
+                } else {
+                    VaultPlaceField(
+                        location = location,
+                        options = standard,
+                        enabled = !busy,
+                        onLocation = { picked ->
+                            location = picked
+                            VaultLocation.save(context, picked)
+                        },
+                        onChooseFolder = { showFolderPicker = true },
+                    )
+                }
                 MvpInput(
-                    value = location,
-                    onValueChange = {},
-                    placeholder = "Vault storage folder",
-                    enabled = false,
+                    value = password,
+                    onValueChange = { password = it },
+                    placeholder = "Password",
+                    isPassword = true,
                 )
-                MvpInput(value = password, onValueChange = { password = it }, placeholder = "Password", isPassword = true)
-                MvpInput(value = confirmation, onValueChange = { confirmation = it }, placeholder = "Confirm password", isPassword = true)
-                MvpDescription("Argon2id security profile")
-                MvpCombo(
-                    selected = profile,
-                    items = listOf(
-                        "Balanced — 256 MiB, 3 iterations",
-                        "High security — 512 MiB, 4 iterations",
-                    ),
-                    onSelect = { profile = it },
-                )
+                if (pcCode == null) {
+                    MvpInput(
+                        value = confirmation,
+                        onValueChange = { confirmation = it },
+                        placeholder = "Confirm password",
+                        isPassword = true,
+                    )
+                    MvpCombo(
+                        selected = profile,
+                        items = listOf(
+                            "Balanced — 256 MiB, 3 iterations",
+                            "High security — 512 MiB, 4 iterations",
+                        ),
+                        onSelect = { profile = it },
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 MvpError(error)
                 if (busy) {
                     Row(
@@ -141,11 +200,29 @@ fun SetupScreen(
                         horizontalArrangement = Arrangement.spacedBy(10.dp),
                     ) {
                         CircularProgressIndicator(Modifier.size(18.dp), color = Mvp.accent, strokeWidth = 2.dp)
-                        Text("Creating the vault — deriving the key…", color = Mvp.description, fontSize = 12.sp)
+                        Text(
+                            if (checkingPc) "Checking the password with the PC…"
+                            else "Creating the vault — deriving the key…",
+                            color = Mvp.description,
+                            fontSize = 12.sp,
+                        )
                     }
                 }
-                MvpButton("Create vault", onClick = { create() }, primary = true, enabled = !busy, modifier = Modifier.fillMaxWidth())
-                MvpButton("Open an existing vault", onClick = onOpenExisting, enabled = !busy, modifier = Modifier.fillMaxWidth())
+                MvpButton(
+                    if (pcCode == null) "Create vault" else "Connect",
+                    onClick = { if (pcCode == null) create() else connect() },
+                    primary = true,
+                    enabled = !busy,
+                    modifier = Modifier.fillMaxWidth(),
+                )
+                if (pcCode == null) {
+                    MvpButton(
+                        "Open an existing vault",
+                        onClick = onOpenExisting,
+                        enabled = !busy,
+                        modifier = Modifier.fillMaxWidth(),
+                    )
+                }
                 if (showFolderPicker) {
                     FolderPickerDialog(
                         onDismiss = { showFolderPicker = false },
@@ -157,6 +234,9 @@ fun SetupScreen(
                     )
                 }
             }
+        }
+        ScanCorner(enabled = !busy) {
+            cameraPermission.launch(Manifest.permission.CAMERA)
         }
     }
 }

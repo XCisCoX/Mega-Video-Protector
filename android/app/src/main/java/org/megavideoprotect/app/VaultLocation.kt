@@ -38,7 +38,13 @@ object VaultLocation {
             .edit().putString(KEY_PATH, path).apply()
     }
 
-    /** Short label for the picker: sandbox vs. per-volume shared storage. */
+    /** A plain name for the unlock screen. The raw path stays off that page. */
+    fun shortName(context: Context, path: String): String = when {
+        path == context.filesDir.absolutePath -> "App-private (recommended)"
+        path.contains("/Android/data/") && path.contains("emulated/0") -> "Shared storage"
+        path.contains("/Android/data/") -> "SD card"
+        else -> java.io.File(path).name.ifBlank { "Chosen folder" }
+    }
     fun label(context: Context, path: String): String = when {
         path == context.filesDir.absolutePath -> "App-private (recommended)"
         path.contains("/Android/data/") ->

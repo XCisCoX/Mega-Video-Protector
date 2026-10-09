@@ -424,7 +424,7 @@ QWidget* MainWindow::buildUnlockedPage() {
         "Import every video file from a folder (and drop files here to import)"));
     shareButton_ = new QPushButton(QStringLiteral("Share"), toolbar);
     shareButton_->setToolTip(QStringLiteral(
-        "Share this vault on Wi-Fi. The phone must enter the vault password. "
+        "Share this vault on Wi-Fi over an encrypted connection. The phone must enter the vault password. "
         "Locking this PC does not stop sharing."));
     settingsButton_ = new QPushButton(QStringLiteral("Settings…"), toolbar);
     settingsButton_->setToolTip(QStringLiteral(

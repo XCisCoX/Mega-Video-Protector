@@ -32,7 +32,7 @@ class VaultDataSource private constructor() : BaseDataSource(/* isNetwork= */ fa
     private var windowConsumed = 0
 
     private fun fillWindow(at: Long) {
-        val want = minOf(WINDOW_BYTES.toLong(), streamSize - at).toInt()
+        val want = minOf((if (RemoteVault.connected()) REMOTE_WINDOW_BYTES else WINDOW_BYTES).toLong(), streamSize - at).toInt()
         if (want <= 0) {
             windowLength = 0
             windowConsumed = 0
@@ -43,7 +43,7 @@ class VaultDataSource private constructor() : BaseDataSource(/* isNetwork= */ fa
         } else {
             CoreBridge.nativeReadRange(videoId, at, want)
         }
-            ?: throw IOException("vault read failed at offset $at")
+            ?: throw IOException(RemoteVault.lastFailure ?: "vault read failed at offset $at")
         val copy = minOf(data.size, window.size)
         System.arraycopy(data, 0, window, 0, copy)
         windowLength = copy
@@ -55,7 +55,7 @@ class VaultDataSource private constructor() : BaseDataSource(/* isNetwork= */ fa
         val id = dataSpec.uri.lastPathSegment?.toLongOrNull()
             ?: throw IOException("malformed vault URI: ${dataSpec.uri}")
         val size = if (RemoteVault.connected()) RemoteVault.videoSize(id) else CoreBridge.nativeVideoSize(id)
-        if (size < 0L) throw IOException("video $id is not in this vault")
+        if (size < 0L) throw IOException(RemoteVault.lastFailure ?: "video $id is not in this vault")
         videoId = id
         streamSize = size
         currentUri = dataSpec.uri
@@ -110,6 +110,7 @@ class VaultDataSource private constructor() : BaseDataSource(/* isNetwork= */ fa
 
     companion object {
         private const val WINDOW_BYTES = 1 shl 20
+        private const val REMOTE_WINDOW_BYTES = 256 * 1024
 
         fun uriFor(videoId: Long): Uri = Uri.parse("mvpvault://video/$videoId")
 

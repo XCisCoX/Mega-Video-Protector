@@ -1,4 +1,5 @@
 #include "videovault/app/share_server.hpp"
+#include "videovault/app/share_tls.hpp"
 
 #include "qrcodegen.hpp"
 #include "videovault/core/vault.hpp"
@@ -15,7 +16,6 @@
 #include <QRandomGenerator>
 #include <QSemaphore>
 #include <QTcpServer>
-#include <QTcpSocket>
 #include <QThread>
 #include <QRunnable>
 #include <QThreadPool>
@@ -86,7 +86,7 @@ QStringList lanHosts() {
 
 class ReplyWriter {
 public:
-    static void send(QTcpSocket* socket, int code, const char* reason,
+    static void send(TlsChannel* socket, int code, const char* reason,
         const QByteArray& type, const QByteArray& body) {
         QByteArray head;
         head += "HTTP/1.1 " + QByteArray::number(code) + " " + reason + "\r\n";
@@ -120,7 +120,7 @@ void wipe(std::string* text) {
     text->clear();
 }
 
-bool writeRaw(QTcpSocket* socket, const char* data, int size) {
+bool writeRaw(TlsChannel* socket, const char* data, int size) {
     int off = 0;
     while (off < size) {
         const qint64 wrote = socket->write(data + off, size - off);
@@ -131,7 +131,7 @@ bool writeRaw(QTcpSocket* socket, const char* data, int size) {
     return true;
 }
 
-bool readRequest(QTcpSocket* socket, Request* request) {
+bool readRequest(TlsChannel* socket, Request* request) {
     QByteArray raw;
     while (!raw.contains("\r\n\r\n")) {
         if (!socket->waitForReadyRead(8000)) return false;
@@ -244,12 +244,13 @@ QByteArray tagsJson(core::Vault& vault) {
     return out.toUtf8();
 }
 
-void handleClient(QTcpSocket* socket, const std::shared_ptr<ShareServer::State>& state);
+void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state);
 
 } // namespace
 
 struct ShareServer::State {
     std::filesystem::path root;
+    std::shared_ptr<ShareTlsIdentity> tls;
     std::mutex gate;
     std::shared_ptr<core::Vault> vault;
     QByteArray tokenHex;
@@ -285,21 +286,18 @@ private:
             ClientTask(qintptr handle, std::shared_ptr<State> state)
                 : handle_(handle), state_(std::move(state)) {}
             void run() override {
-                QTcpSocket socket;
-                if (!socket.setSocketDescriptor(handle_)) return;
+                TlsChannel channel;
+                if (!channel.accept(handle_, state_->tls)) return;
                 try {
-                    handleClient(&socket, state_);
+                    handleClient(&channel, state_);
                 } catch (...) {
                 }
-                // Closing the socket while the phone is still reading resets
-                // the connection. Wait until the bytes are acknowledged and
-                // the phone closes, or a short video dies with an I/O error.
-                socket.flush();
-                socket.waitForBytesWritten(20000);
-                if (socket.state() != QAbstractSocket::UnconnectedState) {
-                    socket.disconnectFromHost();
-                    if (socket.state() != QAbstractSocket::UnconnectedState) {
-                        socket.waitForDisconnected(15000);
+                channel.flush();
+                channel.waitForBytesWritten(20000);
+                if (channel.state() != QAbstractSocket::UnconnectedState) {
+                    channel.disconnectFromHost();
+                    if (channel.state() != QAbstractSocket::UnconnectedState) {
+                        channel.waitForDisconnected(15000);
                     }
                 }
             }
@@ -373,7 +371,7 @@ RangeKind parseRange(const QByteArray& header, std::uint64_t total, ByteRange* o
     return RangeKind::Ok;
 }
 
-void sendFile(QTcpSocket* socket, core::Vault& vault, qlonglong id, const QByteArray& rangeHeader) {
+void sendFile(TlsChannel* socket, core::Vault& vault, qlonglong id, const QByteArray& rangeHeader) {
     auto list = vault.list_videos();
     if (!list) {
         ReplyWriter::send(socket, 500, "Error", "text/plain", "list failed");
@@ -436,7 +434,7 @@ void sendFile(QTcpSocket* socket, core::Vault& vault, qlonglong id, const QByteA
     }
 }
 
-void handleLogin(QTcpSocket* socket, const std::shared_ptr<ShareServer::State>& state, Request& request) {
+void handleLogin(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state, Request& request) {
     const int bodyBytes = request.body.size();
     std::string password(
         bodyBytes > 0 ? request.body.constData() : "",
@@ -496,7 +494,7 @@ void handleLogin(QTcpSocket* socket, const std::shared_ptr<ShareServer::State>& 
         QByteArray("{\"ok\":true,\"token\":\"") + hex + "\"}");
 }
 
-void handleClient(QTcpSocket* socket, const std::shared_ptr<ShareServer::State>& state) {
+void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>& state) {
     Request request;
     if (!readRequest(socket, &request)) {
         ReplyWriter::send(socket, 400, "Bad Request", "text/plain", "bad request");
@@ -680,9 +678,18 @@ bool ShareServer::start(const std::filesystem::path& root, QString* error) {
         if (error != nullptr) *error = QStringLiteral("Unlock the vault before sharing it.");
         return false;
     }
+    QString fingerprint;
+    auto tls = ShareTlsIdentity::create(lanHosts(), &fingerprint, error);
+    if (!tls) {
+        if (error != nullptr && error->isEmpty()) {
+            *error = QStringLiteral("Could not start the encrypted connection.");
+        }
+        return false;
+    }
 
     state_ = std::make_shared<State>();
     state_->root = root;
+    state_->tls = std::move(tls);
     state_->accepting.store(true);
 
     auto* pool = new QThreadPool();
@@ -703,6 +710,7 @@ bool ShareServer::start(const std::filesystem::path& root, QString* error) {
         return false;
     }
     if (onRunning_) onRunning_(true);
+    fingerprint_ = fingerprint;
     return true;
 }
 
@@ -730,6 +738,7 @@ void ShareServer::stop() {
     }
     state_.reset();
     port_ = 0;
+    fingerprint_.clear();
     if (dialog_ != nullptr) {
         dialog_->close();
         dialog_ = nullptr;
@@ -746,7 +755,7 @@ quint16 ShareServer::port() const { return port_; }
 QStringList ShareServer::hosts() const { return lanHosts(); }
 
 QString ShareServer::linkFor(const QString& host) const {
-    return QStringLiteral("mvpvault://%1:%2").arg(host).arg(port_);
+    return QStringLiteral("mvpvault://%1:%2?fp=%3").arg(host).arg(port_).arg(fingerprint_);
 }
 
 void ShareServer::setOnRunning(std::function<void(bool)> callback) {
@@ -771,6 +780,7 @@ void ShareServer::showDialog(QWidget* parent) {
     auto* layout = new QVBoxLayout(dialog);
     auto* intro = new QLabel(QStringLiteral(
         "Scan this code in Mega Video Protect on the phone, then enter this vault's password. "
+        "The phone checks this PC's certificate from the code, and the password travels inside TLS. "
         "Locking this PC does not cut the phone off. Sharing ends when you tap Stop sharing. "
         "The phone and this PC have to be on the same Wi-Fi. "
         "If Windows asks, allow Mega Video Protect on private networks."), dialog);

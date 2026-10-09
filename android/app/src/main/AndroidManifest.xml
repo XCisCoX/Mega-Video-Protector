@@ -21,7 +21,7 @@
         android:icon="@mipmap/icon"
         android:theme="@style/AppTheme"
         android:allowBackup="false"
-        android:usesCleartextTraffic="true"
+        android:usesCleartextTraffic="false"
         android:supportsRtl="false">
 
         <activity
