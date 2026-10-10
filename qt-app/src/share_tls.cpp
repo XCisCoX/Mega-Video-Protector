@@ -128,7 +128,7 @@ struct ShareTlsIdentity::Impl {
         } closer{key};
 
         DWORD nameSize = 0;
-        const wchar_t* subject = L"CN=MegaVideoProtect";
+        const wchar_t* subject = L"CN=MegaVaultProtect";
         if (!CertStrToNameW(X509_ASN_ENCODING, subject, CERT_X500_NAME_STR, nullptr, nullptr, &nameSize,
                 nullptr)) {
             if (error != nullptr) *error = QStringLiteral("Could not start the encrypted connection.");

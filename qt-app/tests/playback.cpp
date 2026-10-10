@@ -36,7 +36,7 @@ public:
         const auto suffix = std::to_wstring(
             std::chrono::steady_clock::now().time_since_epoch().count());
         path_ = std::filesystem::temp_directory_path()
-            / (L"MegaVideoProtect_Playback_" + suffix);
+            / (L"MegaVaultProtect_Playback_" + suffix);
         std::error_code ignored;
         std::filesystem::remove_all(path_, ignored);
         std::filesystem::create_directories(path_, ignored);
@@ -768,7 +768,7 @@ int main() {
     qputenv("QT_PLUGIN_PATH", QLibraryInfo::location(QLibraryInfo::PluginsPath).toUtf8());
     qputenv("QT_QPA_PLATFORM", QByteArrayLiteral("offscreen"));
     int player_argc = 1;
-    char player_name[] = "megavideoprotect-headless-player-test";
+    char player_name[] = "megavaultprotect-headless-player-test";
     char* player_argv[1] = {player_name};
     QApplication player_app(player_argc, player_argv);
 

@@ -30,7 +30,8 @@ public:
 public slots:
     void importFiles(
         std::shared_ptr<std::vector<std::filesystem::path>> sources,
-        std::shared_ptr<videovault::core::Vault> vault);
+        std::shared_ptr<videovault::core::Vault> vault,
+        std::int64_t folder_id);
 
     void restoreVideos(
         std::shared_ptr<std::vector<std::int64_t>> ids,

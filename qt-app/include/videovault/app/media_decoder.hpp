@@ -19,6 +19,13 @@ struct DecodedFrame {
     std::int64_t pts_ms{0};
 };
 
+// Title, artist, and album read from the container tags (ID3, Vorbis, MP4).
+struct AudioTags {
+    QString title;
+    QString artist;
+    QString album;
+};
+
 // In-process FFmpeg player engine. It streams the plaintext of an encrypted
 // video through `Vault::read_video_range` (bounded, per-chunk authenticated)
 // via a custom AVIO context — nothing is ever written to disk and no
@@ -46,17 +53,28 @@ public:
     // FFmpeg codec name of the video stream (e.g. "h264", "png", "mjpeg").
     std::string video_codec_name() const;
 
+    // True when a real video stream (not an embedded album cover) was opened.
+    bool has_video() const;
     // True when an audio stream is available and configured.
     bool has_audio() const;
     int audio_sample_rate() const;
     int audio_channels() const;
+    // Tag fields from the open container. Empty when the file has none.
+    AudioTags audio_tags() const;
+    // Embedded cover art, when the container carries an attached picture.
+    QImage attached_cover() const;
 
     // Streaming memory budget for the read-ahead window (bytes): how much of
-    // the video the player pulls into RAM ahead of the playhead. Larger values
+    // the file the player pulls into RAM ahead of the playhead. Larger values
     // prefetch more (fewer disk/decrypt hits, more memory); applies to the
-    // next window load. Clamped to >= 4 MiB.
+    // next window load. Clamped to >= 1 MiB. Music uses 1 MiB so opening a
+    // song does not decrypt the rest of the file.
     void set_stream_cache_bytes(std::size_t bytes);
     std::size_t stream_cache_bytes() const;
+
+    // Open the next file as audio: a short header probe, no still-image
+    // demuxer attempts, and no scan of the rest of the song.
+    void prepare_for_audio();
 
     // Decodes frames directly at the given display size (sws scale target),
     // so the player avoids a second scaling pass. Rebuilds the scaler only
@@ -71,6 +89,10 @@ public:
     // append s16le PCM to the internal buffer). Returns false at EOF or on
     // decode failure.
     bool decode_next_video_frame(DecodedFrame* frame);
+
+    // Decodes until at least `min_samples` interleaved PCM samples are buffered,
+    // or the file ends. Returns false when no samples were produced.
+    bool pump_audio(int min_samples, std::int64_t* pts_ms);
 
     // Interleaved s16le PCM decoded since the last call, in the format
     // reported by audio_sample_rate()/audio_channels().

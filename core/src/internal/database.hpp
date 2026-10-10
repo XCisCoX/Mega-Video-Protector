@@ -24,8 +24,18 @@ struct VideoRow {
     std::uint32_t chunk_size{0U};
     std::array<unsigned char, 16> package_id{};
     std::uint64_t imported_at{0U};
+    // 0 means the library root. Stored as NULL in the database.
+    std::int64_t folder_id{0};
     // Phase 7: tag names attached to this video (lowercase-sorted).
     std::vector<std::string> tag_names;
+};
+
+// A virtual folder. parent_id 0 is the library root. Packages are not moved.
+struct FolderRow {
+    std::int64_t id{0};
+    std::int64_t parent_id{0};
+    std::string name;
+    std::uint64_t created_at{0U};
 };
 
 struct TagRow {
@@ -132,6 +142,42 @@ public:
     [[nodiscard]] Result<std::vector<TagRow>> tags_for_video(std::int64_t video_id) const;
 
     [[nodiscard]] Result<std::vector<TagRow>> list_tags() const;
+
+    // Virtual folders. parent_id 0 is the library root.
+    [[nodiscard]] Result<std::vector<FolderRow>> list_folders() const;
+
+    [[nodiscard]] Result<FolderRow> query_folder(std::int64_t folder_id) const;
+
+    [[nodiscard]] Result<bool> name_taken(
+        std::int64_t parent_id,
+        const std::string& name,
+        std::int64_t except_folder_id,
+        std::int64_t except_video_id) const;
+
+    [[nodiscard]] Result<std::int64_t> insert_folder(
+        std::int64_t parent_id,
+        const std::string& name);
+
+    [[nodiscard]] Result<bool> rename_folder_row(
+        std::int64_t folder_id,
+        const std::string& name);
+
+    [[nodiscard]] Result<bool> set_folder_parent(
+        std::int64_t folder_id,
+        std::int64_t parent_id);
+
+    // Moves every video in the folder and its children up to parent_id
+    // (NULL when parent_id is 0), then deletes the folder. Child folders
+    // go with it. Package files are not touched.
+    [[nodiscard]] Result<bool> remove_folder_row(std::int64_t folder_id);
+
+    [[nodiscard]] Result<bool> rename_video_row(
+        std::int64_t video_id,
+        const std::string& name);
+
+    [[nodiscard]] Result<bool> set_video_folder(
+        std::int64_t video_id,
+        std::int64_t folder_id);
 
     void close() noexcept;
     [[nodiscard]] bool is_open() const noexcept { return database_ != nullptr; }

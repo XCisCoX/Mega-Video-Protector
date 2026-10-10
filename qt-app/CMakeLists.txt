@@ -21,6 +21,7 @@ set(MVP_APP_SOURCES
     src/main_window.cpp
     src/media_decoder.cpp
     src/player_window.cpp
+    src/music_window.cpp
     src/settings_dialog.cpp
     src/batch_worker.cpp
     src/share_server.cpp
@@ -29,6 +30,7 @@ set(MVP_APP_SOURCES
     include/videovault/app/main_window.hpp
     include/videovault/app/media_decoder.hpp
     include/videovault/app/player_window.hpp
+    include/videovault/app/music_window.hpp
     include/videovault/app/settings_dialog.hpp
     include/videovault/app/batch_worker.hpp
     include/videovault/app/share_server.hpp
@@ -38,7 +40,7 @@ set(MVP_APP_SOURCES
 
 if(ANDROID)
     # Android apps are shared libraries: androiddeployqt packages the .so into
-    # the APK, where the Qt Activity (android.app.lib_name = MegaVideoProtect)
+    # the APK, where the Qt Activity (android.app.lib_name = MegaVaultProtect)
     # loads it. There is no WIN32 subsystem or .rc resource on Android.
     add_library(VideoVaultApp SHARED ${MVP_APP_SOURCES})
     set_target_properties(VideoVaultApp PROPERTIES
@@ -48,7 +50,7 @@ else()
 endif()
 
 if(WIN32)
-    # Embeds the application icon into MegaVideoProtect.exe (Explorer,
+    # Embeds the application icon into MegaVaultProtect.exe (Explorer,
     # taskbar, and the Alt-Tab icon all come from this resource).
     target_sources(VideoVaultApp PRIVATE resources/app.rc)
 endif()
@@ -82,7 +84,7 @@ endif()
 
 target_compile_features(VideoVaultApp PRIVATE cxx_std_20)
 set_target_properties(VideoVaultApp PROPERTIES
-    OUTPUT_NAME "MegaVideoProtect"
+    OUTPUT_NAME "MegaVaultProtect"
     FOLDER "Application"
     AUTOMOC ON
     AUTORCC ON

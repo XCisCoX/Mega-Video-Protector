@@ -1,8 +1,8 @@
 <div align="center">
 
-<img src="docs/MVP-logo.png" alt="Mega Video Protect" width="130" height="130" />
+<img src="docs/MVP-logo.png" alt="Mega Vault Protect" width="130" height="130" />
 
-# Mega Video Protect
+# Mega Vault Protect
 
 <p align="center">
   <img src="https://readme-typing-svg.demolab.com?font=Fira+Code&weight=600&size=20&pause=1000&color=5B7CFA&center=true&vCenter=true&width=580&lines=Your+private+video+vault.;Encrypted+on+your+machine.;Playable+without+ever+decrypting+to+disk." alt="Typing SVG" />
@@ -32,7 +32,7 @@
 
 **Your private video vault — encrypted on your machine, playable without ever decrypting to disk.**
 
-Mega Video Protect is a video organizer that treats privacy as the default. Every video you import is split into authenticated, encrypted packages stored inside a vault locked by a password you choose; nothing leaves your computer. The app plays back your videos **in memory** through a streaming, tamper-checked reader — the plaintext never touches your disk. The same C++ core powers a **native Android app** (Kotlin/Jetpack Compose) whose UI mirrors the desktop client exactly, with the core exposed through a JNI bridge.
+Mega Vault Protect is a video organizer that treats privacy as the default. Every video you import is split into authenticated, encrypted packages stored inside a vault locked by a password you choose; nothing leaves your computer. The app plays back your videos **in memory** through a streaming, tamper-checked reader — the plaintext never touches your disk. The same C++ core powers a **native Android app** (Kotlin/Jetpack Compose) whose UI mirrors the desktop client exactly, with the core exposed through a JNI bridge.
 
 ## Features
 
@@ -68,13 +68,13 @@ The phone library uses the same three views. Swipe changes clips; the top bar sh
 
 ## Downloads
 
-Each [GitHub Release](https://github.com/XCisCoX/Mega-Video-Protector/releases) has three files:
+Each [GitHub Release](https://github.com/XCisCoX/Mega-Vault-Protector/releases) has three files:
 
 | File | How to run it |
 |---|---|
-| `MegaVideoProtect-windows-x64.zip` | Unzip and run `MegaVideoProtect.exe`. |
-| `MegaVideoProtect-linux-x64.tar.gz` | Extract and run `./MegaVideoProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). |
-| `MegaVideoProtect-android-arm64.apk` | Install on an arm64 phone running Android 8 or newer. |
+| `MegaVaultProtect-windows-x64.zip` | Unzip and run `MegaVaultProtect.exe`. |
+| `MegaVaultProtect-linux-x64.tar.gz` | Extract and run `./MegaVaultProtect.sh`. Needs glibc 2.39 or newer (Ubuntu 24.04). |
+| `MegaVaultProtect-android-arm64.apk` | Install on an arm64 phone running Android 8 or newer. |
 
 Create another release from Actions → **Release** → Run workflow, or push a tag such as `v0.4.0`. The Android package is debug-signed so it can be installed directly. If a later release is signed with a different debug key, uninstall the old one before installing the new APK. 
 
@@ -108,7 +108,7 @@ cmake --preset linux-debug            # or linux-release
 cmake --build --preset linux-debug -j "$(nproc)"
 ctest --preset linux-debug --output-on-failure   # all 7 suites, headless
 
-out/build/linux-debug/qt-app/MegaVideoProtect    # run
+out/build/linux-debug/qt-app/MegaVaultProtect    # run
 ```
 
 Audio output needs Qt 5 Multimedia's GStreamer backend (`libqt5multimedia5-plugins` + base/good plugins).
@@ -143,7 +143,7 @@ docker run --rm --user root -e HOST_UID="$(id -u)" -v "$PWD":/repo \
   saschpe/android-ndk:36.1-jdk25.0.3_9-ndk30.0.14904198-cmake3.31.6 \
   bash out/android-arm64/build-android-app.sh
 
-adb install -r out/android-arm64/MegaVideoProtect-native-debug.apk
+adb install -r out/android-arm64/MegaVaultProtect-native-debug.apk
 ```
 
 Full procedure, SDK-wiring details, and limitations: [docs/ANDROID-BUILD.md](docs/ANDROID-BUILD.md).

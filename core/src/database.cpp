@@ -432,6 +432,78 @@ Result<bool> migrate_to_version_4(sqlite3* database) {
     return true;
 }
 
+Result<bool> migrate_to_version_5(sqlite3* database) {
+    auto transaction = run(database, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [database] { (void)run(database, "ROLLBACK;"); };
+
+    Statement current(database, "SELECT max(version) FROM schema_migrations;");
+    if (current.status() != SQLITE_OK || sqlite3_step(current.get()) != SQLITE_ROW) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseCorrupt,
+            "read current schema version", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+    const int version = sqlite3_column_int(current.get(), 0);
+    if (version >= 5) {
+        auto committed = run(database, "COMMIT;");
+        if (!committed) {
+            rollback();
+            return committed.error();
+        }
+        return true;
+    }
+
+    // parent_id NULL is the library root. The unique index uses IFNULL so two
+    // folders at the root cannot share a name (NULL would not collide).
+    auto created = run(database,
+        "CREATE TABLE folders ("
+        "id INTEGER PRIMARY KEY AUTOINCREMENT,"
+        "parent_id INTEGER REFERENCES folders(id) ON DELETE CASCADE,"
+        "name TEXT NOT NULL,"
+        "created_at INTEGER NOT NULL);");
+    if (!created) {
+        rollback();
+        return created.error();
+    }
+    auto indexed = run(database,
+        "CREATE UNIQUE INDEX folders_name_in_parent"
+        " ON folders(IFNULL(parent_id, 0), name COLLATE NOCASE);");
+    if (!indexed) {
+        rollback();
+        return indexed.error();
+    }
+    auto added = run(database,
+        "ALTER TABLE videos ADD COLUMN folder_id INTEGER"
+        " REFERENCES folders(id) ON DELETE SET NULL;");
+    if (!added) {
+        rollback();
+        return added.error();
+    }
+
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database,
+        "INSERT INTO schema_migrations(version, applied_at) VALUES(5, ?1);");
+    if (insert.status() != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 1, now) != SQLITE_OK
+        || sqlite3_step(insert.get()) != SQLITE_DONE) {
+        const auto error = database_error(database, VaultErrorCode::DatabaseFailure,
+            "insert schema migration 5", sqlite3_extended_errcode(database));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
 VideoRow row_from_statement(sqlite3_stmt* statement) {
     VideoRow row;
     row.id = sqlite3_column_int64(statement, 0);
@@ -458,12 +530,16 @@ VideoRow row_from_statement(sqlite3_stmt* statement) {
         std::copy(id_bytes.begin(), id_bytes.end(), row.package_id.begin());
     }
     row.imported_at = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 10));
+    row.folder_id = sqlite3_column_type(statement, 11) == SQLITE_NULL
+        ? 0
+        : sqlite3_column_int64(statement, 11);
     return row;
 }
 
 constexpr const char* kVideoColumns =
     "id, display_name, original_size, package_relative_path, package_size,"
-    " package_sha256, format_version, algorithm_id, chunk_size, package_id, imported_at";
+    " package_sha256, format_version, algorithm_id, chunk_size, package_id,"
+    " imported_at, folder_id";
 
 } // namespace
 
@@ -516,6 +592,10 @@ Result<Database> Database::create(
     if (!migrated_v4) {
         return migrated_v4.error();
     }
+    auto migrated_v5 = migrate_to_version_5(database.value().database_);
+    if (!migrated_v5) {
+        return migrated_v5.error();
+    }
     return std::move(database.value());
 }
 
@@ -543,6 +623,10 @@ Result<Database> Database::open(
     auto migrated_v4 = migrate_to_version_4(database.value().database_);
     if (!migrated_v4) {
         return migrated_v4.error();
+    }
+    auto migrated_v5 = migrate_to_version_5(database.value().database_);
+    if (!migrated_v5) {
+        return migrated_v5.error();
     }
     return std::move(database.value());
 }
@@ -594,8 +678,8 @@ Result<std::int64_t> Database::insert_video(
     Statement insert(database_,
         "INSERT INTO videos(display_name, original_size, package_relative_path,"
         " package_size, package_sha256, format_version, algorithm_id, chunk_size,"
-        " package_id, imported_at)"
-        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10);");
+        " package_id, imported_at, folder_id)"
+        " VALUES(?1, ?2, ?3, ?4, ?5, ?6, ?7, ?8, ?9, ?10, ?11);");
     if (insert.status() != SQLITE_OK
         || sqlite3_bind_text(insert.get(), 1, row.display_name.c_str(),
                static_cast<int>(row.display_name.size()), SQLITE_TRANSIENT) != SQLITE_OK
@@ -624,6 +708,9 @@ Result<std::int64_t> Database::insert_video(
     if (!bound_id
         || sqlite3_bind_int64(insert.get(), 10,
                static_cast<sqlite3_int64>(row.imported_at)) != SQLITE_OK
+        || (row.folder_id > 0
+            ? sqlite3_bind_int64(insert.get(), 11, row.folder_id)
+            : sqlite3_bind_null(insert.get(), 11)) != SQLITE_OK
         || sqlite3_step(insert.get()) != SQLITE_DONE) {
         const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
             "execute video insert", sqlite3_extended_errcode(database_));
@@ -1144,6 +1231,316 @@ Result<std::vector<TagRow>> Database::list_tags() const {
             "execute tag listing", sqlite3_extended_errcode(database_));
     }
     return tags;
+}
+
+namespace {
+
+FolderRow folder_from_statement(sqlite3_stmt* statement) {
+    FolderRow row;
+    row.id = sqlite3_column_int64(statement, 0);
+    row.parent_id = sqlite3_column_type(statement, 1) == SQLITE_NULL
+        ? 0
+        : sqlite3_column_int64(statement, 1);
+    if (const auto* name = reinterpret_cast<const char*>(sqlite3_column_text(statement, 2));
+        name != nullptr) {
+        row.name.assign(name, static_cast<std::size_t>(sqlite3_column_bytes(statement, 2)));
+    }
+    row.created_at = static_cast<std::uint64_t>(sqlite3_column_int64(statement, 3));
+    return row;
+}
+
+} // namespace
+
+Result<std::vector<FolderRow>> Database::list_folders() const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT id, parent_id, name, created_at FROM folders"
+        " ORDER BY name COLLATE NOCASE;");
+    if (query.status() != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare folder listing", sqlite3_extended_errcode(database_));
+    }
+    std::vector<FolderRow> folders;
+    int status = SQLITE_OK;
+    while ((status = sqlite3_step(query.get())) == SQLITE_ROW) {
+        folders.push_back(folder_from_statement(query.get()));
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute folder listing", sqlite3_extended_errcode(database_));
+    }
+    return folders;
+}
+
+Result<FolderRow> Database::query_folder(const std::int64_t folder_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT id, parent_id, name, created_at FROM folders WHERE id = ?1;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1, folder_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare folder query", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(query.get());
+    if (status == SQLITE_DONE) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    if (status != SQLITE_ROW) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute folder query", sqlite3_extended_errcode(database_));
+    }
+    return folder_from_statement(query.get());
+}
+
+Result<bool> Database::name_taken(
+    const std::int64_t parent_id,
+    const std::string& name,
+    const std::int64_t except_folder_id,
+    const std::int64_t except_video_id) const {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement query(database_,
+        "SELECT 1 FROM folders"
+        " WHERE IFNULL(parent_id, 0) = ?1 AND name = ?2 COLLATE NOCASE AND id != ?3"
+        " UNION SELECT 1 FROM videos"
+        " WHERE IFNULL(folder_id, 0) = ?1 AND display_name = ?2 COLLATE NOCASE AND id != ?4"
+        " LIMIT 1;");
+    if (query.status() != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 1, parent_id) != SQLITE_OK
+        || sqlite3_bind_text(query.get(), 2, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 3, except_folder_id) != SQLITE_OK
+        || sqlite3_bind_int64(query.get(), 4, except_video_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare name check", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(query.get());
+    if (status != SQLITE_ROW && status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "execute name check", sqlite3_extended_errcode(database_));
+    }
+    return status == SQLITE_ROW;
+}
+
+Result<std::int64_t> Database::insert_folder(
+    const std::int64_t parent_id,
+    const std::string& name) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    const auto now = std::chrono::duration_cast<std::chrono::seconds>(
+        std::chrono::system_clock::now().time_since_epoch()).count();
+    Statement insert(database_,
+        "INSERT INTO folders(parent_id, name, created_at) VALUES(?1, ?2, ?3);");
+    if (insert.status() != SQLITE_OK
+        || (parent_id > 0
+            ? sqlite3_bind_int64(insert.get(), 1, parent_id)
+            : sqlite3_bind_null(insert.get(), 1)) != SQLITE_OK
+        || sqlite3_bind_text(insert.get(), 2, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(insert.get(), 3, now) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare folder insert", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(insert.get());
+    if (status == SQLITE_CONSTRAINT || status == SQLITE_CONSTRAINT_UNIQUE
+        || status == SQLITE_CONSTRAINT_FOREIGNKEY) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "a folder or file with this name is already here"};
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "insert folder", sqlite3_extended_errcode(database_));
+    }
+    return sqlite3_last_insert_rowid(database_);
+}
+
+Result<bool> Database::rename_folder_row(
+    const std::int64_t folder_id,
+    const std::string& name) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement update(database_, "UPDATE folders SET name = ?1 WHERE id = ?2;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 1, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 2, folder_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare folder rename", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(update.get());
+    if (status == SQLITE_CONSTRAINT || status == SQLITE_CONSTRAINT_UNIQUE) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "a folder or file with this name is already here"};
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "rename folder", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    return true;
+}
+
+Result<bool> Database::set_folder_parent(
+    const std::int64_t folder_id,
+    const std::int64_t parent_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement update(database_, "UPDATE folders SET parent_id = ?1 WHERE id = ?2;");
+    if (update.status() != SQLITE_OK
+        || (parent_id > 0
+            ? sqlite3_bind_int64(update.get(), 1, parent_id)
+            : sqlite3_bind_null(update.get(), 1)) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 2, folder_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare folder move", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(update.get());
+    if (status == SQLITE_CONSTRAINT || status == SQLITE_CONSTRAINT_UNIQUE
+        || status == SQLITE_CONSTRAINT_FOREIGNKEY) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "a folder or file with this name is already there"};
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "move folder", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    return true;
+}
+
+Result<bool> Database::remove_folder_row(const std::int64_t folder_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    auto all = list_folders();
+    if (!all) {
+        return all.error();
+    }
+    const FolderRow* self = nullptr;
+    for (const auto& folder : all.value()) {
+        if (folder.id == folder_id) {
+            self = &folder;
+            break;
+        }
+    }
+    if (self == nullptr) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    const std::int64_t parent_id = self->parent_id;
+    std::vector<std::int64_t> subtree;
+    subtree.push_back(folder_id);
+    for (std::size_t index = 0; index < subtree.size(); ++index) {
+        for (const auto& folder : all.value()) {
+            if (folder.parent_id == subtree[index]) {
+                subtree.push_back(folder.id);
+            }
+        }
+    }
+
+    auto transaction = run(database_, "BEGIN IMMEDIATE;");
+    if (!transaction) {
+        return transaction.error();
+    }
+    const auto rollback = [this] { (void)run(database_, "ROLLBACK;"); };
+
+    std::string id_list;
+    for (std::size_t index = 0; index < subtree.size(); ++index) {
+        if (index > 0U) {
+            id_list += ',';
+        }
+        id_list += std::to_string(subtree[index]);
+    }
+    const std::string sql = parent_id > 0
+        ? "UPDATE videos SET folder_id = ?1 WHERE folder_id IN (" + id_list + ");"
+        : "UPDATE videos SET folder_id = NULL WHERE folder_id IN (" + id_list + ");";
+    Statement update(database_, sql.c_str());
+    if (update.status() != SQLITE_OK
+        || (parent_id > 0 && sqlite3_bind_int64(update.get(), 1, parent_id) != SQLITE_OK)
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "move videos out of folder", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+
+    Statement remove(database_, "DELETE FROM folders WHERE id = ?1;");
+    if (remove.status() != SQLITE_OK
+        || sqlite3_bind_int64(remove.get(), 1, folder_id) != SQLITE_OK
+        || sqlite3_step(remove.get()) != SQLITE_DONE) {
+        const auto error = database_error(database_, VaultErrorCode::DatabaseFailure,
+            "delete folder", sqlite3_extended_errcode(database_));
+        rollback();
+        return error;
+    }
+
+    auto committed = run(database_, "COMMIT;");
+    if (!committed) {
+        rollback();
+        return committed.error();
+    }
+    return true;
+}
+
+Result<bool> Database::rename_video_row(
+    const std::int64_t video_id,
+    const std::string& name) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement update(database_, "UPDATE videos SET display_name = ?1 WHERE id = ?2;");
+    if (update.status() != SQLITE_OK
+        || sqlite3_bind_text(update.get(), 1, name.c_str(),
+               static_cast<int>(name.size()), SQLITE_TRANSIENT) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 2, video_id) != SQLITE_OK
+        || sqlite3_step(update.get()) != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "rename video", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown video"};
+    }
+    return true;
+}
+
+Result<bool> Database::set_video_folder(
+    const std::int64_t video_id,
+    const std::int64_t folder_id) {
+    if (database_ == nullptr) {
+        return VaultError{VaultErrorCode::DatabaseFailure, "database is closed"};
+    }
+    Statement update(database_, "UPDATE videos SET folder_id = ?1 WHERE id = ?2;");
+    if (update.status() != SQLITE_OK
+        || (folder_id > 0
+            ? sqlite3_bind_int64(update.get(), 1, folder_id)
+            : sqlite3_bind_null(update.get(), 1)) != SQLITE_OK
+        || sqlite3_bind_int64(update.get(), 2, video_id) != SQLITE_OK) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "prepare video move", sqlite3_extended_errcode(database_));
+    }
+    const int status = sqlite3_step(update.get());
+    if (status == SQLITE_CONSTRAINT || status == SQLITE_CONSTRAINT_FOREIGNKEY) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    if (status != SQLITE_DONE) {
+        return database_error(database_, VaultErrorCode::DatabaseFailure,
+            "move video", sqlite3_extended_errcode(database_));
+    }
+    if (sqlite3_changes(database_) == 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown video"};
+    }
+    return true;
 }
 
 } // namespace videovault::core::internal

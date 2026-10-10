@@ -13,6 +13,7 @@ class QComboBox;
 class QDragEnterEvent;
 class QShowEvent;
 class QDropEvent;
+class QHBoxLayout;
 class QLabel;
 class QLineEdit;
 class QListWidget;
@@ -31,6 +32,7 @@ class QFutureWatcher;
 
 namespace videovault::core {
 class Vault;
+struct FolderInfo;
 struct ThumbnailInfo;
 struct TagInfo;
 template <typename T>
@@ -41,6 +43,7 @@ namespace videovault::app {
 
 struct VaultOperationResult;
 class PlayerWindow;
+class MusicWindow;
 
 // Snapshot of tag data loaded off the UI thread for the tag editor dialog.
 // Holds every selected video when the user edits tags on a multi-selection;
@@ -81,17 +84,29 @@ private:
     void finishOperation();
     void beginImport();
     void beginImportFolder();
-    void beginImportMany(std::vector<std::filesystem::path> sources);
+    void beginImportMany(std::vector<std::filesystem::path> sources, std::int64_t folder_id);
+    bool handleExplorerDrag(QObject* watched, QEvent* event);
+    void moveItemsToFolder(std::int64_t destination);
+    void highlightDropFolder(std::int64_t folder_id, bool on);
+    bool galleryHasFocus() const;
     void beginRestoreSelected();
     void finishBatch(bool ok, const QString& message, int count);
     void refreshGallery();
-    void beginRemoveSelected();
+    void openFolder(std::int64_t folder_id);
+    void rebuildBreadcrumb();
+    void beginNewFolder();
+    void beginRenameFolder(std::int64_t folder_id);
+    void beginRemoveFolder(std::int64_t folder_id);
+    void beginRenameVideo(std::int64_t video_id);
+    void beginMoveSelection(std::int64_t moving_folder_id);
+    int selectedGalleryKind() const;
+    void activateCurrentItem();
+    void beginRemoveSelected(bool ask = true);
     void beginChangePassword();
     void finishChangePassword();
     void openSettings();
-    void beginGenerateThumbnail(const std::vector<std::int64_t>& ids = {});
-    void finishGenerateThumbnail();
     void beginPlayback(std::int64_t video_id);
+    void beginMusic(std::int64_t video_id);
     void stepPlayback(int delta);
     void embedPlayer();
     void popPlayer();
@@ -141,6 +156,12 @@ private:
     QLabel* galleryStatus_{nullptr};
     QPushButton* importButton_{nullptr};
     QPushButton* importFolderButton_{nullptr};
+    QPushButton* newFolderButton_{nullptr};
+    QWidget* crumbHost_{nullptr};
+    QHBoxLayout* crumbLayout_{nullptr};
+    std::int64_t currentFolderId_{0};
+    std::int64_t dropHighlight_{-1};
+    std::vector<core::FolderInfo> folders_;
     QPushButton* settingsButton_{nullptr};
     QPushButton* shareButton_{nullptr};
     QComboBox* viewModeCombo_{nullptr};
@@ -155,6 +176,7 @@ private:
     QListWidget* iconList_{nullptr};
     QProgressBar* progressBar_{nullptr};
     PlayerWindow* playerWindow_{nullptr};
+    MusicWindow* musicWindow_{nullptr};
     QLabel* statusCountLabel_{nullptr};
     FrostedBar* libraryTop_{nullptr};
     FrostedBar* libraryBottom_{nullptr};
@@ -179,7 +201,6 @@ private:
     bool batchBusy_{false};
     QFutureWatcher<std::shared_ptr<VaultOperationResult>>* watcher_{nullptr};
     QFutureWatcher<std::shared_ptr<core::Result<bool>>>* adminWatcher_{nullptr};
-    QFutureWatcher<std::shared_ptr<core::Result<int>>>* thumbnailWatcher_{nullptr};
     QFutureWatcher<std::shared_ptr<TagEditorData>>* tagEditorWatcher_{nullptr};
     // Shared so worker threads can hold the vault alive during import/list.
     std::shared_ptr<core::Vault> vault_;

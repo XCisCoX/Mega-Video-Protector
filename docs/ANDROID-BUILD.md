@@ -14,7 +14,7 @@ desktop app's security model.
 
 | Artifact | Path |
 |---|---|
-| Debug APK (arm64-v8a) | `out/android-arm64/MegaVideoProtect-native-debug.apk` |
+| Debug APK (arm64-v8a) | `out/android-arm64/MegaVaultProtect-native-debug.apk` |
 | Native libs (deps + core) | `out/android-arm64/prefix/lib/*.a` |
 | Build log | `out/android-arm64/gradle-build.log` |
 
@@ -53,7 +53,7 @@ docker run --rm --user root -e HOST_UID="$(id -u)" \
   bash out/android-arm64/build-android-app.sh
 
 # 3. Install on a device (debug-signed).
-adb install -r out/android-arm64/MegaVideoProtect-native-debug.apk
+adb install -r out/android-arm64/MegaVaultProtect-native-debug.apk
 ```
 
 ## How the SDK wiring works (and why)
@@ -142,7 +142,7 @@ Before uploading, the job asserts the APK really carries a working native core:
 point the Kotlin side declares exported from the `.so`. A broken native link
 otherwise produces a "successful" build with a dead core.
 
-The artifact is `MegaVideoProtect-native-debug` (30-day retention). To build
+The artifact is `MegaVaultProtect-native-debug` (30-day retention). To build
 without pushing: Actions → Android Build → Run workflow.
 
 ## Project layout (Android)
@@ -161,7 +161,7 @@ android/
         CoreBridge.kt        # JNI surface (18 externals, JSON-marshalled)
         Models.kt            # VideoEntry / TagEntry (org.json parsing)
         SetupScreen.kt       # "Create your encrypted vault"
-        LoginScreen.kt       # "Unlock Mega Video Protect"
+        LoginScreen.kt       # "Unlock Mega Vault Protect"
         VaultScreen.kt       # toolbar + Details/Icons/List + SAF import
         SettingsDialog.kt    # change password + tag management
         PlayerScreen.kt      # seekable frame preview (decode via JNI)

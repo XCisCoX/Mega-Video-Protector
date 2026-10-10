@@ -1,10 +1,10 @@
 #!/usr/bin/env bash
-# Bundle MegaVideoProtect with the Qt, FFmpeg, and GStreamer libraries it
+# Bundle MegaVaultProtect with the Qt, FFmpeg, and GStreamer libraries it
 # loads, so the release tarball runs without a matching -dev install.
 # Glibc itself stays on the system (Ubuntu 24.04 / glibc 2.39 or newer).
 set -euo pipefail
 
-bin="${1:?path to the MegaVideoProtect binary}"
+bin="${1:?path to the MegaVaultProtect binary}"
 archive="${2:?output tar.gz path}"
 
 if [[ ! -x "$bin" ]]; then
@@ -13,11 +13,11 @@ if [[ ! -x "$bin" ]]; then
 fi
 
 stage="$(mktemp -d)"
-root="$stage/MegaVideoProtect"
+root="$stage/MegaVaultProtect"
 mkdir -p "$root/lib" "$root/plugins" "$root/gstreamer-1.0"
 
-cp -L "$bin" "$root/MegaVideoProtect"
-chmod +x "$root/MegaVideoProtect"
+cp -L "$bin" "$root/MegaVaultProtect"
+chmod +x "$root/MegaVaultProtect"
 
 is_system_lib() {
   case "$1" in
@@ -80,7 +80,7 @@ if [[ -d "$gst_dir" ]]; then
   cp -a "$gst_dir/." "$root/gstreamer-1.0/"
 fi
 
-enqueue "$root/MegaVideoProtect"
+enqueue "$root/MegaVaultProtect"
 while IFS= read -r -d '' so; do
   enqueue "$so"
 done < <(find "$root/plugins" "$root/gstreamer-1.0" -type f -name '*.so' -print0)
@@ -91,7 +91,7 @@ while [[ "$index" -lt "${#queue[@]}" ]]; do
   index=$((index + 1))
 done
 
-app_real="$(readlink -f "$root/MegaVideoProtect")"
+app_real="$(readlink -f "$root/MegaVaultProtect")"
 for file in "${queue[@]}"; do
   [[ "$file" == "$app_real" ]] && continue
   case "$file" in
@@ -100,7 +100,7 @@ for file in "${queue[@]}"; do
   cp -L "$file" "$root/lib/$(basename "$file")"
 done
 
-cat > "$root/MegaVideoProtect.sh" << 'EOF'
+cat > "$root/MegaVaultProtect.sh" << 'EOF'
 #!/bin/sh
 HERE=$(CDPATH= cd -- "$(dirname "$0")" && pwd)
 export LD_LIBRARY_PATH="$HERE/lib${LD_LIBRARY_PATH:+:$LD_LIBRARY_PATH}"
@@ -108,20 +108,20 @@ export QT_PLUGIN_PATH="$HERE/plugins"
 export QT_QPA_PLATFORM_PLUGIN_PATH="$HERE/plugins/platforms"
 export GST_PLUGIN_PATH="$HERE/gstreamer-1.0"
 export GST_PLUGIN_SYSTEM_PATH_1_0="$HERE/gstreamer-1.0"
-exec "$HERE/MegaVideoProtect" "$@"
+exec "$HERE/MegaVaultProtect" "$@"
 EOF
-chmod +x "$root/MegaVideoProtect.sh"
+chmod +x "$root/MegaVaultProtect.sh"
 
 cat > "$root/README.txt" << 'EOF'
-Mega Video Protect for Linux x64.
+Mega Vault Protect for Linux x64.
 
 Run:
-  ./MegaVideoProtect.sh
+  ./MegaVaultProtect.sh
 
 This build is linked on Ubuntu 24.04. It needs glibc 2.39 or newer
 (Ubuntu 24.04, or another current distro). Extract the archive and
 start the shell script above; the libraries it needs are in lib/.
 EOF
 
-tar -C "$stage" -czf "$archive" MegaVideoProtect
+tar -C "$stage" -czf "$archive" MegaVaultProtect
 echo "Packaged $archive ($(wc -c < "$archive") bytes)"

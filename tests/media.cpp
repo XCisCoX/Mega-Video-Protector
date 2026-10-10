@@ -26,7 +26,7 @@ public:
         const auto suffix = std::to_wstring(
             std::chrono::steady_clock::now().time_since_epoch().count());
         path_ = std::filesystem::temp_directory_path()
-            / (L"MegaVideoProtect_Phase5_media_" + suffix);
+            / (L"MegaVaultProtect_Phase5_media_" + suffix);
         std::error_code ignored;
         std::filesystem::remove_all(path_, ignored);
         std::filesystem::create_directories(path_, ignored);

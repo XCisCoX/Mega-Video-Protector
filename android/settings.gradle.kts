@@ -24,5 +24,5 @@ dependencyResolutionManagement {
     }
 }
 
-rootProject.name = "MegaVideoProtect"
+rootProject.name = "MegaVaultProtect"
 include(":app")

@@ -192,7 +192,7 @@ public:
 
 private:
     static constexpr std::uint64_t kAlignment = 1U << 20; // 1 MiB
-    static constexpr std::uint64_t kMinBudget = 4U << 20; // 4 MiB
+    static constexpr std::uint64_t kMinBudget = 1U << 20; // 1 MiB
     static constexpr std::uint64_t kNoWindow =
         std::numeric_limits<std::uint64_t>::max();
 
@@ -421,10 +421,14 @@ public:
             "image.bmp", "image.tiff",
         };
         int status = AVERROR_INVALIDDATA;
-        for (const char* hint : kImageHints) {
-            status = open_input(hint);
-            if (status >= 0) {
-                break;
+        if (audio_only_) {
+            status = open_input(nullptr);
+        } else {
+            for (const char* hint : kImageHints) {
+                status = open_input(hint);
+                if (status >= 0) {
+                    break;
+                }
             }
         }
         if (status < 0 || handle_->format == nullptr) {
@@ -436,6 +440,13 @@ public:
         }
         AVFormatContext* raw_format = handle_->format.get();
 
+        if (audio_only_) {
+            // Format limits. A single options dictionary is not legal here:
+            // FFmpeg indexes one dictionary per stream, and album art is a
+            // second stream, so the old call walked off the stack.
+            raw_format->probesize = 262144;
+            raw_format->max_analyze_duration = 500000;
+        }
         status = avformat_find_stream_info(raw_format, nullptr);
         if (status < 0) {
             if (error != nullptr) {
@@ -446,7 +457,11 @@ public:
 
         for (unsigned int index = 0U; index < raw_format->nb_streams; ++index) {
             AVStream* stream = raw_format->streams[index];
-            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_stream_ == -1) {
+            if (stream == nullptr || stream->codecpar == nullptr) {
+                continue;
+            }
+            if (stream->codecpar->codec_type == AVMEDIA_TYPE_VIDEO && video_stream_ == -1
+                && (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0) {
                 video_stream_ = static_cast<int>(index);
                 video_time_base_ = stream->time_base;
                 const AVCodec* decoder =
@@ -471,6 +486,7 @@ public:
                 rebuild_scaler();
             } else if (stream->codecpar->codec_type == AVMEDIA_TYPE_AUDIO && audio_stream_ == -1) {
                 audio_stream_ = static_cast<int>(index);
+                audio_time_base_ = stream->time_base;
                 const AVCodec* decoder =
                     avcodec_find_decoder(stream->codecpar->codec_id);
                 if (decoder == nullptr) {
@@ -507,19 +523,23 @@ public:
             }
         }
 
-        if (video_stream_ == -1) {
+        if (video_stream_ == -1 && audio_stream_ == -1) {
             if (error != nullptr) {
-                *error = QStringLiteral("The video has no decodable video stream.");
+                *error = QStringLiteral("The file has no decodable audio or video stream.");
             }
             return false;
         }
 
+        const int timed_stream = video_stream_ >= 0 ? video_stream_ : audio_stream_;
         if (raw_format->duration != AV_NOPTS_VALUE && raw_format->duration > 0) {
             duration_ms_ = raw_format->duration * 1000 / AV_TIME_BASE;
-        } else if (raw_format->streams[video_stream_]->duration != AV_NOPTS_VALUE) {
+        } else if (raw_format->streams[timed_stream]->duration != AV_NOPTS_VALUE) {
             duration_ms_ = frame_pts_ms_from_ts(
-                raw_format->streams[video_stream_]->duration,
-                raw_format->streams[video_stream_]->time_base);
+                raw_format->streams[timed_stream]->duration,
+                raw_format->streams[timed_stream]->time_base);
+        }
+        if (video_stream_ == -1) {
+            return true;
         }
         // Probing reads the only packet of a still. Put the demuxer back at
         // the start so the player actually gets that frame.
@@ -544,6 +564,7 @@ public:
         audio_samples_.clear();
         video_stream_ = -1;
         audio_stream_ = -1;
+        last_audio_pts_ms_ = 0;
         duration_ms_ = 0;
         video_width_ = 0;
         video_height_ = 0;
@@ -557,19 +578,20 @@ public:
     bool is_open() const { return handle_ != nullptr && handle_->format != nullptr; }
 
     bool seek_to(const std::int64_t ms) {
-        if (!is_open() || video_stream_ < 0) {
+        const int timed_stream = video_stream_ >= 0 ? video_stream_ : audio_stream_;
+        if (!is_open() || timed_stream < 0) {
             last_seek_status_ = AVERROR(EINVAL);
             return false;
         }
         const auto target_ts = av_rescale_q(
-            ms, AVRational{1, 1000}, handle_->format->streams[video_stream_]->time_base);
+            ms, AVRational{1, 1000}, handle_->format->streams[timed_stream]->time_base);
         // Backward seek lands on the keyframe at/before the target — the
         // classic, most compatible API; fall back to the range form.
         last_seek_status_ = av_seek_frame(
-            handle_->format.get(), video_stream_, target_ts, AVSEEK_FLAG_BACKWARD);
+            handle_->format.get(), timed_stream, target_ts, AVSEEK_FLAG_BACKWARD);
         if (last_seek_status_ < 0) {
             last_seek_status_ = avformat_seek_file(
-                handle_->format.get(), video_stream_, INT64_MIN, target_ts, target_ts, 0);
+                handle_->format.get(), timed_stream, INT64_MIN, target_ts, target_ts, 0);
         }
         if (last_seek_status_ < 0) {
             return false;
@@ -584,7 +606,67 @@ public:
             avcodec_flush_buffers(audio_codec_.get());
         }
         audio_samples_.clear();
+        last_audio_pts_ms_ = ms;
         return true;
+    }
+
+    bool pump_audio(const int min_samples, std::int64_t* pts_ms) {
+        if (!is_open() || !audio_codec_ || !swr_) {
+            return false;
+        }
+        auto ready = [&]() {
+            if (pts_ms != nullptr) {
+                *pts_ms = last_audio_pts_ms_;
+            }
+            return !audio_samples_.empty();
+        };
+        if (min_samples > 0 && static_cast<int>(audio_samples_.size()) >= min_samples) {
+            return ready();
+        }
+        while (true) {
+            AvPacketPtr packet(av_packet_alloc());
+            const int read_status = av_read_frame(handle_->format.get(), packet.get());
+            if (read_status < 0) {
+                if (avcodec_send_packet(audio_codec_.get(), nullptr) >= 0) {
+                    while (true) {
+                        AvFramePtr decoded(av_frame_alloc());
+                        const int receive_status =
+                            avcodec_receive_frame(audio_codec_.get(), decoded.get());
+                        if (receive_status < 0) {
+                            break;
+                        }
+                        last_audio_pts_ms_ = frame_pts_ms(decoded.get(), audio_time_base_);
+                        append_audio(decoded.get());
+                    }
+                }
+                return ready();
+            }
+            if (packet->stream_index != audio_stream_) {
+                av_packet_unref(packet.get());
+                continue;
+            }
+            const int send_status = avcodec_send_packet(audio_codec_.get(), packet.get());
+            av_packet_unref(packet.get());
+            if (send_status < 0) {
+                continue;
+            }
+            while (true) {
+                AvFramePtr decoded(av_frame_alloc());
+                const int receive_status =
+                    avcodec_receive_frame(audio_codec_.get(), decoded.get());
+                if (receive_status == AVERROR(EAGAIN) || receive_status == AVERROR_EOF) {
+                    break;
+                }
+                if (receive_status < 0) {
+                    return ready();
+                }
+                last_audio_pts_ms_ = frame_pts_ms(decoded.get(), audio_time_base_);
+                append_audio(decoded.get());
+            }
+            if (min_samples <= 0 || static_cast<int>(audio_samples_.size()) >= min_samples) {
+                return ready();
+            }
+        }
     }
 
     int last_seek_status_{0};
@@ -665,16 +747,79 @@ public:
             ? std::string(avcodec_get_name(video_codec_->codec_id))
             : std::string();
     }
+    bool has_video() const { return video_stream_ != -1 && video_codec_ != nullptr; }
     bool has_audio() const { return audio_stream_ != -1 && audio_codec_ && swr_; }
     int audio_sample_rate() const { return audio_sample_rate_; }
     int audio_channels() const { return audio_channels_; }
 
+    AudioTags audio_tags() const {
+        AudioTags tags;
+        if (!is_open()) {
+            return tags;
+        }
+        const auto read = [](AVDictionary* dict, const char* const* keys) {
+            if (dict == nullptr) {
+                return QString();
+            }
+            for (const char* const* key = keys; *key != nullptr; ++key) {
+                const AVDictionaryEntry* entry = av_dict_get(dict, *key, nullptr, 0);
+                if (entry != nullptr && entry->value != nullptr && entry->value[0] != '\0') {
+                    return QString::fromUtf8(entry->value).trimmed();
+                }
+            }
+            return QString();
+        };
+        static const char* const kTitle[] = {"title", "TIT2", nullptr};
+        static const char* const kArtist[] = {"artist", "album_artist", "performer", "TPE1", "TPE2", nullptr};
+        static const char* const kAlbum[] = {"album", "TALB", nullptr};
+        AVFormatContext* format = handle_->format.get();
+        tags.title = read(format->metadata, kTitle);
+        tags.artist = read(format->metadata, kArtist);
+        tags.album = read(format->metadata, kAlbum);
+        if (audio_stream_ >= 0) {
+            AVDictionary* stream = format->streams[audio_stream_]->metadata;
+            if (tags.title.isEmpty()) {
+                tags.title = read(stream, kTitle);
+            }
+            if (tags.artist.isEmpty()) {
+                tags.artist = read(stream, kArtist);
+            }
+            if (tags.album.isEmpty()) {
+                tags.album = read(stream, kAlbum);
+            }
+        }
+        return tags;
+    }
+
+    QImage attached_cover() const {
+        if (!is_open()) {
+            return {};
+        }
+        AVFormatContext* format = handle_->format.get();
+        for (unsigned int index = 0; index < format->nb_streams; ++index) {
+            AVStream* stream = format->streams[index];
+            if (stream->codecpar == nullptr
+                || stream->codecpar->codec_type != AVMEDIA_TYPE_VIDEO
+                || (stream->disposition & AV_DISPOSITION_ATTACHED_PIC) == 0
+                || stream->attached_pic.size <= 0
+                || stream->attached_pic.data == nullptr) {
+                continue;
+            }
+            QImage image;
+            image.loadFromData(stream->attached_pic.data, stream->attached_pic.size);
+            return image;
+        }
+        return {};
+    }
+
     void set_stream_cache_bytes(const std::size_t bytes) {
-        cache_budget_ = std::max<std::size_t>(bytes, std::size_t{4U << 20});
+        cache_budget_ = std::max<std::size_t>(bytes, std::size_t{1U << 20});
         if (handle_) {
             handle_->source.set_cache_budget(cache_budget_);
         }
     }
+
+    void prepare_for_audio() { audio_only_ = true; }
 
     std::size_t stream_cache_bytes() const {
         return static_cast<std::size_t>(cache_budget_);
@@ -827,6 +972,8 @@ public:
     std::unique_ptr<FormatHandle> handle_;
     int video_stream_{-1};
     int audio_stream_{-1};
+    AVRational audio_time_base_{1, 1000};
+    std::int64_t last_audio_pts_ms_{0};
     AVRational video_time_base_{0, 1};
     AvCodecPtr video_codec_;
     AvCodecPtr audio_codec_;
@@ -839,6 +986,7 @@ public:
     int audio_sample_rate_{0};
     int audio_channels_{0};
     std::uint64_t cache_budget_{kDefaultStreamCacheBytes};
+    bool audio_only_{false};
     int display_width_{0};
     int display_height_{0};
     AVPixelFormat scaler_src_fmt_{AV_PIX_FMT_NONE};
@@ -863,9 +1011,16 @@ int MediaDecoder::video_height() const { return impl_->video_height(); }
 std::string MediaDecoder::video_codec_name() const {
     return impl_->video_codec_name();
 }
+bool MediaDecoder::has_video() const { return impl_->has_video(); }
 bool MediaDecoder::has_audio() const { return impl_->has_audio(); }
 int MediaDecoder::audio_sample_rate() const { return impl_->audio_sample_rate(); }
 int MediaDecoder::audio_channels() const { return impl_->audio_channels(); }
+AudioTags MediaDecoder::audio_tags() const {
+    return impl_ ? impl_->audio_tags() : AudioTags{};
+}
+QImage MediaDecoder::attached_cover() const {
+    return impl_ ? impl_->attached_cover() : QImage{};
+}
 int MediaDecoder::seek_to(const std::int64_t ms) {
     if (impl_ == nullptr) {
         return AVERROR(EINVAL);
@@ -876,6 +1031,9 @@ int MediaDecoder::seek_to(const std::int64_t ms) {
 bool MediaDecoder::decode_next_video_frame(DecodedFrame* frame) {
     return impl_->decode_next_video_frame(frame);
 }
+bool MediaDecoder::pump_audio(const int min_samples, std::int64_t* pts_ms) {
+    return impl_->pump_audio(min_samples, pts_ms);
+}
 std::vector<std::int16_t> MediaDecoder::take_audio_samples() {
     return impl_->take_audio_samples();
 }
@@ -883,6 +1041,12 @@ std::vector<std::int16_t> MediaDecoder::take_audio_samples() {
 void MediaDecoder::set_stream_cache_bytes(const std::size_t bytes) {
     if (impl_) {
         impl_->set_stream_cache_bytes(bytes);
+    }
+}
+
+void MediaDecoder::prepare_for_audio() {
+    if (impl_) {
+        impl_->prepare_for_audio();
     }
 }
 

@@ -18,7 +18,15 @@ object CoreBridge {
     external fun nativeIsUnlocked(): Boolean
     external fun nativeLock(): String
     external fun nativeListVideos(): String
+    external fun nativeListFolders(): String
+    external fun nativeCreateFolder(parentId: Long, name: String): String
+    external fun nativeRenameFolder(id: Long, name: String): String
+    external fun nativeRemoveFolder(id: Long): String
+    external fun nativeMoveFolder(id: Long, parentId: Long): String
+    external fun nativeRenameVideo(id: Long, name: String): String
+    external fun nativeMoveVideo(id: Long, folderId: Long): String
     external fun nativeImportFile(path: String): String
+    external fun nativeImportInto(path: String, folderId: Long): String
     external fun nativeRemoveVideo(id: Long): String
     external fun nativeThumbnail(id: Long, maxDimension: Int): ByteArray?
     external fun nativeMediaInfo(id: Long): String

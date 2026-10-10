@@ -80,8 +80,19 @@ struct VideoInfo {
     std::array<unsigned char, 32> package_sha256{};
     std::string package_relative_path;
     std::uint64_t imported_at{0U};
+    // 0 is the library root. A video lives in one folder.
+    std::int64_t folder_id{0};
     // Phase 7: tag names attached to this video (case-insensitively sorted).
     std::vector<std::string> tags;
+};
+
+// A virtual folder. parent_id 0 is the library root. Removing a folder
+// moves its videos up one level; the encrypted packages stay where they are.
+struct FolderInfo {
+    std::int64_t id{0};
+    std::int64_t parent_id{0};
+    std::string name;
+    std::uint64_t created_at{0U};
 };
 
 // Phase 7: a tag with the number of videos it is attached to.
@@ -99,6 +110,9 @@ struct MediaInfo {
     std::uint32_t height{0U};
     std::uint32_t rotation_degrees{0U};
     std::string codec_name;
+    // Empty when the container has no tag. The gallery then uses the file name.
+    std::string title;
+    std::string artist;
 };
 
 // A decrypted JPEG thumbnail ready for display.
@@ -147,9 +161,12 @@ public:
     // vault database. Identical content re-imports return the existing id.
     // `progress`, when given, receives a monotonic 0.0..1.0 fraction of the
     // file processed, called from the importing thread.
+    // folder_id 0 stores the new video in the library root. An existing
+    // copy of the same file keeps the folder it already has.
     [[nodiscard]] Result<std::int64_t> import_file(
         const std::filesystem::path& source_path,
-        const std::function<void(double)>& progress = {});
+        const std::function<void(double)>& progress = {},
+        std::int64_t folder_id = 0);
 
     [[nodiscard]] Result<std::vector<VideoInfo>> list_videos() const;
 
@@ -176,6 +193,31 @@ public:
     // stored package file. Returns InvalidArgument for an unknown id.
     [[nodiscard]] Result<bool> remove_video(std::int64_t video_id);
 
+    [[nodiscard]] Result<std::vector<FolderInfo>> list_folders() const;
+
+    [[nodiscard]] Result<std::int64_t> create_folder(
+        std::int64_t parent_id,
+        std::string_view name);
+
+    [[nodiscard]] Result<bool> rename_folder(
+        std::int64_t folder_id,
+        std::string_view name);
+
+    // Videos inside move to the parent folder. Nothing is decrypted or deleted.
+    [[nodiscard]] Result<bool> remove_folder(std::int64_t folder_id);
+
+    [[nodiscard]] Result<bool> move_folder(
+        std::int64_t folder_id,
+        std::int64_t new_parent_id);
+
+    [[nodiscard]] Result<bool> rename_video(
+        std::int64_t video_id,
+        std::string_view name);
+
+    [[nodiscard]] Result<bool> move_video(
+        std::int64_t video_id,
+        std::int64_t folder_id);
+
     // Re-keys the vault with a new password: new salt and Argon2id parameters,
     // SQLCipher rekey, a fresh sealed password verifier, and re-wrapped file
     // keys. The vault stays unlocked under the new credentials on success.
@@ -187,6 +229,13 @@ public:
     // Returns the stored thumbnail, decrypting it for display.
     [[nodiscard]] Result<ThumbnailInfo> thumbnail(
         std::int64_t video_id) const;
+
+    // Thumbnail for the gallery and the player. For a song, a stored music-note
+    // placeholder is replaced the first time a real embedded cover can be read,
+    // and that cover stays in the vault.
+    [[nodiscard]] Result<ThumbnailInfo> display_thumbnail(
+        std::int64_t video_id,
+        std::uint32_t max_dimension = 320U) const;
 
     // Phase 5: media metadata and encrypted thumbnails.
     // Probes an imported video's container through FFmpeg (streaming over the

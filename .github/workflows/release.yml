@@ -126,7 +126,7 @@ jobs:
         shell: pwsh
         run: |
           $exeDir = "out/build/vs2022-x64/qt-app/Release"
-          $exe = "$exeDir\MegaVideoProtect.exe"
+          $exe = "$exeDir\MegaVaultProtect.exe"
           if (-not (Test-Path $exe)) { throw "Release exe not found: $exe" }
           $staging = "$env:RUNNER_TEMP\package"
           New-Item -ItemType Directory -Force -Path $staging | Out-Null
@@ -138,21 +138,21 @@ jobs:
           # fail on clean machines.
           Get-ChildItem "$exeDir\*.dll" | Copy-Item -Destination $staging
           # Gather Qt platform plugins, styles, ICU, etc.
-          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVideoProtect.exe"
+          & "$env:QT_ROOT_DIR\bin\windeployqt.exe" --release --no-translations "$staging\MegaVaultProtect.exe"
           # Defensive: the crypto stack and the five FFmpeg DLLs must be in the
           # package (throw with a clear message if any are missing).
           foreach ($dll in @("argon2.dll","libsodium.dll","sqlcipher.dll","libcrypto-3-x64.dll","zlib1.dll","avcodec-61.dll","avformat-61.dll","avutil-59.dll","swscale-8.dll","swresample-5.dll")) {
             if (-not (Test-Path "$staging\$dll")) { throw "Missing runtime DLL in package: $dll" }
           }
-          Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVideoProtect-windows-x64.zip" -Force
+          Compress-Archive -Path "$staging\*" -DestinationPath "$env:RUNNER_TEMP\MegaVaultProtect-windows-x64.zip" -Force
           Write-Output "Packaged:"
           Get-ChildItem $staging | Select-Object -ExpandProperty Name
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MegaVideoProtect-windows-x64
-          path: ${{ runner.temp }}/MegaVideoProtect-windows-x64.zip
+          name: MegaVaultProtect-windows-x64
+          path: ${{ runner.temp }}/MegaVaultProtect-windows-x64.zip
 
   build-linux:
     runs-on: ubuntu-24.04
@@ -183,14 +183,14 @@ jobs:
       - name: Package application
         run: |
           bash scripts/package-linux-release.sh \
-            out/build/linux-release/qt-app/MegaVideoProtect \
-            "$RUNNER_TEMP/MegaVideoProtect-linux-x64.tar.gz"
+            out/build/linux-release/qt-app/MegaVaultProtect \
+            "$RUNNER_TEMP/MegaVaultProtect-linux-x64.tar.gz"
 
       - name: Upload artifact
         uses: actions/upload-artifact@v4
         with:
-          name: MegaVideoProtect-linux-x64
-          path: ${{ runner.temp }}/MegaVideoProtect-linux-x64.tar.gz
+          name: MegaVaultProtect-linux-x64
+          path: ${{ runner.temp }}/MegaVaultProtect-linux-x64.tar.gz
 
   build-android:
     uses: ./.github/workflows/android-build.yml
@@ -226,26 +226,26 @@ jobs:
           set -euo pipefail
           dir="${{ runner.temp }}/artifacts"
           ls -la "$dir"
-          test -f "$dir/MegaVideoProtect-windows-x64.zip"
-          test -f "$dir/MegaVideoProtect-linux-x64.tar.gz"
+          test -f "$dir/MegaVaultProtect-windows-x64.zip"
+          test -f "$dir/MegaVaultProtect-linux-x64.tar.gz"
           test -f "$dir/app-debug.apk"
-          mv "$dir/app-debug.apk" "$dir/MegaVideoProtect-android-arm64.apk"
+          mv "$dir/app-debug.apk" "$dir/MegaVaultProtect-android-arm64.apk"
 
       - name: Create GitHub Release
         uses: softprops/action-gh-release@v2
         with:
           tag_name: ${{ steps.version.outputs.tag }}
-          name: Mega Video Protect ${{ steps.version.outputs.tag }}
+          name: Mega Vault Protect ${{ steps.version.outputs.tag }}
           fail_on_unmatched_files: true
           body: |
             Windows, Linux, and Android downloads for this version.
 
-            - **Windows x64:** unzip and run `MegaVideoProtect.exe`.
-            - **Linux x64:** extract and run `./MegaVideoProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive.
-            - **Android (arm64):** install `MegaVideoProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. This build is signed with the CI debug key, so a newer download replaces it only after you uninstall the previous copy if the signature ever changes.
+            - **Windows x64:** unzip and run `MegaVaultProtect.exe`.
+            - **Linux x64:** extract and run `./MegaVaultProtect.sh`. Built on Ubuntu 24.04; needs glibc 2.39 or newer. Libraries are in the archive.
+            - **Android (arm64):** install `MegaVaultProtect-android-arm64.apk` on an arm64 phone running Android 8 or newer. Allow installs from your browser or file manager. This build is signed with the CI debug key, so a newer download replaces it only after you uninstall the previous copy if the signature ever changes.
 
             The vault stays on your machine. Playback does not decrypt videos onto disk.
           files: |
-            ${{ runner.temp }}/artifacts/MegaVideoProtect-windows-x64.zip
-            ${{ runner.temp }}/artifacts/MegaVideoProtect-linux-x64.tar.gz
-            ${{ runner.temp }}/artifacts/MegaVideoProtect-android-arm64.apk
+            ${{ runner.temp }}/artifacts/MegaVaultProtect-windows-x64.zip
+            ${{ runner.temp }}/artifacts/MegaVaultProtect-linux-x64.tar.gz
+            ${{ runner.temp }}/artifacts/MegaVaultProtect-android-arm64.apk

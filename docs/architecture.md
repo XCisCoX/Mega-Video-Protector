@@ -1,4 +1,4 @@
-# Mega Video Protect architecture
+# Mega Vault Protect architecture
 
 ## Phase boundary
 

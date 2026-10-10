@@ -52,6 +52,14 @@ private val IMAGE_EXTENSIONS =
 fun isImageName(name: String): Boolean =
     name.substringAfterLast('.', "").lowercase() in IMAGE_EXTENSIONS
 
+private val AUDIO_EXTENSIONS = setOf(
+    "mp3", "flac", "wav", "wave", "ogg", "oga", "opus", "m4a", "aac",
+    "wma", "aiff", "aif", "alac", "mp2", "mka",
+)
+
+fun isAudioName(name: String): Boolean =
+    name.substringAfterLast('.', "").lowercase() in AUDIO_EXTENSIONS
+
 /**
  * Full-screen viewer for an image inside the vault. The frame comes from the
  * core's decoder over the encrypted package (nothing is written to disk) at
@@ -77,13 +85,11 @@ fun ImageViewerScreen(
         val maxDimension = maxOf(metrics.widthPixels, metrics.heightPixels).coerceIn(1024, 2560)
         val decoded = withContext(Dispatchers.Default) {
             runCatching {
-                if (RemoteVault.connected()) {
-                    RemoteVault.readAll(videoId, 30 * 1024 * 1024)?.let {
-                        BitmapFactory.decodeByteArray(it, 0, it.size)
-                    }
-                } else {
-                    CoreBridge.nativeDecodeFrame(videoId, 0, maxDimension)?.let(::rgbaToBitmap)
-                }
+                // The phone's decoder understands the JPEGs the gallery exported.
+                // FFmpeg's content probe was opening some of them as an empty
+                // PNG and reporting that the stored file could not be decoded.
+                decodeVaultImage(videoId, maxDimension)
+                    ?: CoreBridge.nativeDecodeFrame(videoId, 0, maxDimension)?.let(::rgbaToBitmap)
             }.getOrNull()
         }
         bitmap = decoded
@@ -201,6 +207,37 @@ fun ImageViewerScreen(
  * image data, which is why decoding always failed before — rebuild the bitmap
  * from the pixels instead.
  */
+/** Decrypts a stored picture and decodes it with the platform image decoder. */
+fun decodeVaultImage(id: Long, maxSide: Int): Bitmap? {
+    val encoded = if (RemoteVault.connected()) {
+        RemoteVault.readAll(id, 40 * 1024 * 1024)
+    } else {
+        val size = CoreBridge.nativeVideoSize(id)
+        if (size <= 0L || size > 40L * 1024 * 1024) return null
+        val all = ByteArray(size.toInt())
+        var offset = 0
+        while (offset < all.size) {
+            val want = minOf(1 shl 20, all.size - offset)
+            val chunk = CoreBridge.nativeReadRange(id, offset.toLong(), want) ?: return null
+            if (chunk.isEmpty()) break
+            val count = minOf(chunk.size, all.size - offset)
+            System.arraycopy(chunk, 0, all, offset, count)
+            offset += count
+        }
+        if (offset <= 0) null else all.copyOf(offset)
+    } ?: return null
+    val bounds = BitmapFactory.Options().apply { inJustDecodeBounds = true }
+    BitmapFactory.decodeByteArray(encoded, 0, encoded.size, bounds)
+    if (bounds.outWidth <= 0 || bounds.outHeight <= 0) return null
+    var sample = 1
+    val limit = maxSide.coerceAtLeast(1)
+    while (bounds.outWidth / sample > limit || bounds.outHeight / sample > limit) {
+        sample *= 2
+    }
+    val options = BitmapFactory.Options().apply { inSampleSize = sample }
+    return BitmapFactory.decodeByteArray(encoded, 0, encoded.size, options)
+}
+
 internal fun rgbaToBitmap(bytes: ByteArray): Bitmap? {
     if (bytes.size < 8) return null
     fun u32(at: Int): Int =

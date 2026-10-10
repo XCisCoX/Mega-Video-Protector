@@ -1,5 +1,8 @@
 package org.megavideoprotect.app
 
+import android.content.Intent
+import android.net.Uri
+import android.os.Build
 import android.os.Bundle
 import android.os.SystemClock
 import androidx.activity.ComponentActivity
@@ -22,6 +25,8 @@ private object AppSession {
 
 class MainActivity : ComponentActivity() {
     private var screen by mutableStateOf<Screen>(Screen.Login)
+    /** Files handed over from another app's Share / Send menu. Held until the vault is open. */
+    private var pendingShare by mutableStateOf<List<Uri>>(emptyList())
 
     private fun show(next: Screen) {
         screen = next
@@ -38,10 +43,25 @@ class MainActivity : ComponentActivity() {
     }
 
     private fun lockNow() {
+        if (MusicHub.active) {
+            startService(
+                Intent(this, MusicPlaybackService::class.java)
+                    .setAction(MusicPlaybackService.ACTION_STOP),
+            )
+        }
         if (RemoteVault.connected()) RemoteVault.disconnect()
         else runCatching { CoreBridge.nativeLock() }
         GalleryCache.clear()
         show(Screen.Login)
+    }
+
+    private fun openMusicFromNotification(source: Intent?) {
+        if (source?.getBooleanExtra(EXTRA_OPEN_MUSIC, false) != true) return
+        if (!unlocked() || MusicHub.tracks.isEmpty()) return
+        val songs = MusicHub.tracks
+        val id = MusicHub.anchorId.takeIf { anchor -> songs.any { it.id == anchor } } ?: songs.first().id
+        val title = songs.firstOrNull { it.id == id }?.name ?: songs.first().name
+        show(Screen.Music(id, title, songs, startFresh = false))
     }
 
     override fun onCreate(savedInstanceState: Bundle?) {
@@ -65,6 +85,8 @@ class MainActivity : ComponentActivity() {
         } else {
             show(Screen.Setup)
         }
+        acceptShare(intent)
+        openMusicFromNotification(intent)
 
         setContent {
             MaterialTheme(colorScheme = MvpColorScheme) {
@@ -72,7 +94,7 @@ class MainActivity : ComponentActivity() {
                 // the login screen it leaves the app without locking.
                 BackHandler(enabled = screen !is Screen.Setup) {
                     when (screen) {
-                        is Screen.Player, is Screen.Image -> show(Screen.Vault)
+                        is Screen.Player, is Screen.Image, is Screen.Music -> show(Screen.Vault)
                         else -> moveTaskToBack(true)
                     }
                 }
@@ -94,15 +116,33 @@ class MainActivity : ComponentActivity() {
                         is Screen.Vault -> VaultScreen(
                             vaultLocation = RemoteVault.label() ?: vaultRoot,
                             onLock = { lockNow() },
+                            shareUris = pendingShare,
+                            onShareHandled = { pendingShare = emptyList() },
+                            onOpenMusic = {
+                                val songs = MusicHub.tracks
+                                if (songs.isNotEmpty()) {
+                                    val id = MusicHub.anchorId.takeIf { anchor -> songs.any { it.id == anchor } }
+                                        ?: songs.first().id
+                                    val title = songs.firstOrNull { it.id == id }?.name ?: songs.first().name
+                                    show(Screen.Music(id, title, songs, startFresh = false))
+                                }
+                            },
                             onPlay = { id, name, playlist ->
                                 show(
-                                    if (isImageName(name)) {
-                                        Screen.Image(id, name)
-                                    } else {
-                                        val playable = playlist
-                                            .filter { !isImageName(it.name) }
-                                            .map { PlayItem(it.id, it.name) }
-                                        Screen.Player(id, name, playable)
+                                    when {
+                                        isImageName(name) -> Screen.Image(id, name)
+                                        isAudioName(name) -> {
+                                            val songs = playlist
+                                                .filter { isAudioName(it.name) }
+                                                .map { PlayItem(it.id, it.name) }
+                                            Screen.Music(id, name, songs)
+                                        }
+                                        else -> {
+                                            val playable = playlist
+                                                .filter { !isImageName(it.name) && !isAudioName(it.name) }
+                                                .map { PlayItem(it.id, it.name) }
+                                            Screen.Player(id, name, playable)
+                                        }
                                     },
                                 )
                             },
@@ -118,15 +158,40 @@ class MainActivity : ComponentActivity() {
                             name = current.name,
                             onBack = { show(Screen.Vault) },
                         )
+                        is Screen.Music -> MusicScreen(
+                            videoId = current.videoId,
+                            name = current.name,
+                            playlist = current.playlist,
+                            startFresh = current.startFresh,
+                            onBack = { show(Screen.Vault) },
+                        )
                     }
                 }
             }
         }
     }
 
+    override fun onNewIntent(intent: Intent) {
+        super.onNewIntent(intent)
+        setIntent(intent)
+        acceptShare(intent)
+        openMusicFromNotification(intent)
+    }
+
+    /** Pulls the files out of a Share / Send intent. Ignored for a normal launch. */
+    private fun acceptShare(intent: Intent?) {
+        val uris = intent?.sharedStreams().orEmpty()
+        if (uris.isEmpty()) return
+        pendingShare = uris
+        val inside = screen is Screen.Vault || screen is Screen.Player
+            || screen is Screen.Image || screen is Screen.Music
+        if (inside && unlocked()) show(Screen.Vault)
+    }
+
     override fun onStart() {
         super.onStart()
-        val inside = screen is Screen.Vault || screen is Screen.Player || screen is Screen.Image
+        val inside = screen is Screen.Vault || screen is Screen.Player
+            || screen is Screen.Image || screen is Screen.Music
         if (inside && awayTooLong()) lockNow()
         AppSession.leftAt = 0L
     }
@@ -135,4 +200,27 @@ class MainActivity : ComponentActivity() {
         AppSession.leftAt = SystemClock.elapsedRealtime()
         super.onStop()
     }
+}
+
+/** Content URIs attached to ACTION_SEND or ACTION_SEND_MULTIPLE. */
+private fun Intent.sharedStreams(): List<Uri> {
+    if (action != Intent.ACTION_SEND && action != Intent.ACTION_SEND_MULTIPLE) return emptyList()
+    val found = LinkedHashSet<Uri>()
+    fun add(uri: Uri?) {
+        if (uri != null) found.add(uri)
+    }
+    if (Build.VERSION.SDK_INT >= 33) {
+        add(getParcelableExtra(Intent.EXTRA_STREAM, Uri::class.java))
+        getParcelableArrayListExtra(Intent.EXTRA_STREAM, Uri::class.java)?.forEach { add(it) }
+    } else {
+        @Suppress("DEPRECATION")
+        add(getParcelableExtra(Intent.EXTRA_STREAM))
+        @Suppress("DEPRECATION")
+        getParcelableArrayListExtra<Uri>(Intent.EXTRA_STREAM)?.forEach { add(it) }
+    }
+    val clip = clipData
+    if (clip != null) {
+        for (index in 0 until clip.itemCount) add(clip.getItemAt(index).uri)
+    }
+    return found.toList()
 }

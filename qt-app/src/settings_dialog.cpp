@@ -122,6 +122,38 @@ SettingsDialog::SettingsDialog(
     securityLayout->addWidget(changePasswordButton_);
     layout->addWidget(securityBox);
 
+    layout->addWidget(section(QStringLiteral("Lock after")));
+    auto* lockBox = new QFrame(sheet);
+    lockBox->setObjectName(QStringLiteral("settingsGroup"));
+    lockBox->setAttribute(Qt::WA_StyledBackground, true);
+    auto* lockLayout = new QVBoxLayout(lockBox);
+    lockLayout->setContentsMargins(0, 4, 0, 4);
+    lockLayout->setSpacing(0);
+    auto* lockAfter = new QComboBox(lockBox);
+    const struct {
+        int minutes;
+        const char* label;
+    } lockChoices[] = {
+        {0, "Never"},
+        {5, "5 minutes"},
+        {15, "15 minutes"},
+        {60, "1 hour"},
+        {240, "4 hours"},
+    };
+    const int savedLock = QSettings().value(QStringLiteral("security/autoLockMinutes"), 5).toInt();
+    int lockIndex = 1;
+    for (int i = 0; i < 5; ++i) {
+        lockAfter->addItem(QString::fromUtf8(lockChoices[i].label), lockChoices[i].minutes);
+        if (lockChoices[i].minutes == savedLock) {
+            lockIndex = i;
+        }
+    }
+    lockAfter->setCurrentIndex(lockIndex);
+    lockAfter->setToolTip(QStringLiteral(
+        "Lock the vault after this long with no clicks or key presses"));
+    lockLayout->addWidget(lockAfter);
+    layout->addWidget(lockBox);
+
     layout->addWidget(section(QStringLiteral("Tags")));
     auto* tagsBox = new QFrame(sheet);
     tagsBox->setObjectName(QStringLiteral("settingsGroup"));
@@ -174,11 +206,33 @@ SettingsDialog::SettingsDialog(
     status_->setStyleSheet(QStringLiteral("color: #ff6b6b;"));
     layout->addWidget(status_);
 
+    auto* about = new QLabel(sheet);
+    about->setTextFormat(Qt::RichText);
+    about->setTextInteractionFlags(Qt::TextBrowserInteraction);
+    about->setOpenExternalLinks(true);
+    about->setAlignment(Qt::AlignHCenter);
+    about->setCursor(Qt::PointingHandCursor);
+    about->setStyleSheet(QStringLiteral(
+        "color: #8e8e93; background: transparent; font-size: 12px;"));
+    about->setText(QStringLiteral(
+        "<a href=\"https://github.com/XCisCoX/Mega-Vault-Protector\" style=\"color:#8e8e93; text-decoration:none;\">"
+        "github.com/XCisCoX/Mega-Vault-Protector</a>"));
+    layout->addWidget(about);
+
     outer->addWidget(sheet, 0, Qt::AlignHCenter);
     outer->addStretch(1);
 
     connect(done, &QPushButton::clicked, this, &QDialog::reject);
 
+    connect(lockAfter, qOverload<int>(&QComboBox::currentIndexChanged),
+        this, [lockAfter, this](int index) {
+            if (index < 0) {
+                return;
+            }
+            QSettings().setValue(QStringLiteral("security/autoLockMinutes"),
+                lockAfter->itemData(index).toInt());
+            emit this->settingsChanged();
+        });
     connect(changePasswordButton_, &QPushButton::clicked,
         this, [this] { beginPasswordChange(); });
     connect(addTagButton_, &QPushButton::clicked, this, [this] { addTag(); });

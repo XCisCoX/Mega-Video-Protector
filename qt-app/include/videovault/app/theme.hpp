@@ -70,6 +70,26 @@ inline QString appStyleSheet() {
             border: 1px solid rgba(255, 255, 255, 36);
             selection-background-color: #3390ec;
         }
+        QMenu {
+            background-color: #1c1c1e;
+            color: #ffffff;
+            border: 1px solid rgba(255, 255, 255, 36);
+            border-radius: 14px;
+            padding: 6px;
+        }
+        QMenu::item {
+            background: transparent;
+            color: #ffffff;
+            padding: 8px 16px;
+            margin: 2px 4px;
+            border-radius: 8px;
+        }
+        QMenu::item:selected { background: rgba(51, 144, 236, 90); }
+        QMenu::separator {
+            height: 1px;
+            background: rgba(255, 255, 255, 28);
+            margin: 6px 12px;
+        }
         QPushButton {
             min-height: 36px;
             color: #ffffff;

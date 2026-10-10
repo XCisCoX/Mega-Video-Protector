@@ -30,6 +30,47 @@ constexpr std::uint64_t kPackageWrappingSubkeyId = 3U;
 constexpr std::uint64_t kThumbnailSubkeyId = 4U;
 constexpr std::uint32_t kImportThumbnailDimension = 320U;
 
+bool is_audio_display_name(const std::string& name) {
+    const auto dot = name.find_last_of('.');
+    if (dot == std::string::npos || dot + 1U >= name.size()) {
+        return false;
+    }
+    std::string ext = name.substr(dot + 1U);
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    static constexpr const char* kExtensions[] = {
+        "mp3", "flac", "wav", "wave", "ogg", "oga", "opus", "m4a", "aac",
+        "wma", "aiff", "aif", "alac", "mp2", "mka",
+    };
+    for (const char* known : kExtensions) {
+        if (ext == known) {
+            return true;
+        }
+    }
+    return false;
+}
+
+std::string audio_open_hint(const std::string& name) {
+    const auto dot = name.find_last_of('.');
+    std::string ext = dot == std::string::npos ? std::string("mp3") : name.substr(dot + 1U);
+    for (char& c : ext) {
+        if (c >= 'A' && c <= 'Z') {
+            c = static_cast<char>(c - 'A' + 'a');
+        }
+    }
+    if (ext == "wave") {
+        ext = "wav";
+    } else if (ext == "aif") {
+        ext = "aiff";
+    } else if (ext == "oga") {
+        ext = "ogg";
+    }
+    return "audio." + ext;
+}
+
 std::string to_hex_lower(const std::span<const unsigned char> bytes) {
     static constexpr char digits[] = "0123456789abcdef";
     std::string encoded;
@@ -69,6 +110,67 @@ std::string normalize_tag_name(const std::string_view raw) {
         }
     }
     return std::string(trimmed);
+}
+
+// Folder and file names share one rule: trimmed, no path separators, and
+// short enough to show in the gallery. The empty string means "reject".
+std::string normalize_entry_name(const std::string_view raw) {
+    std::size_t begin = 0;
+    std::size_t end = raw.size();
+    while (begin < end && (raw[begin] == ' ' || raw[begin] == '\t')) {
+        ++begin;
+    }
+    while (end > begin && (raw[end - 1] == ' ' || raw[end - 1] == '\t')) {
+        --end;
+    }
+    const std::string_view trimmed = raw.substr(begin, end - begin);
+    if (trimmed.empty() || trimmed.size() > 120U || trimmed == "." || trimmed == "..") {
+        return {};
+    }
+    for (const char byte : trimmed) {
+        const auto value = static_cast<unsigned char>(byte);
+        if (value < 0x20U || value == 0x7fU || byte == '/' || byte == '\\'
+            || byte == ':' || byte == '*' || byte == '?' || byte == '"'
+            || byte == '<' || byte == '>' || byte == '|') {
+            return {};
+        }
+    }
+    return std::string(trimmed);
+}
+
+VaultError name_rejected() {
+    return {VaultErrorCode::InvalidArgument,
+        "Use a name of 1–120 characters, without slashes or other reserved characters."};
+}
+
+VaultError name_taken() {
+    return {VaultErrorCode::InvalidArgument,
+        "A folder or file with this name is already here."};
+}
+
+// True when `node` is `ancestor` or sits inside it.
+bool folder_contains(
+    const std::vector<internal::FolderRow>& folders,
+    const std::int64_t ancestor,
+    const std::int64_t node) {
+    std::int64_t cursor = node;
+    for (int depth = 0; depth < 64 && cursor != 0; ++depth) {
+        if (cursor == ancestor) {
+            return true;
+        }
+        bool found = false;
+        for (const auto& folder : folders) {
+            if (folder.id == cursor) {
+                cursor = folder.parent_id;
+                found = true;
+                break;
+            }
+        }
+        if (!found) {
+            return false;
+        }
+    }
+    return false;
 }
 
 VaultError locked_error() {
@@ -141,9 +243,41 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     }
     std::uint32_t width = 0U;
     std::uint32_t height = 0U;
-    auto jpeg = internal::extract_thumbnail_jpeg(reader.value(), max_dimension, width, height);
+    const bool audio = is_audio_display_name(row.value().display_name);
+    const auto hint = audio_open_hint(row.value().display_name);
+    int art_kind = 1;
+    auto jpeg = audio
+        ? internal::extract_audio_thumbnail_jpeg(
+            reader.value(), max_dimension, width, height, hint.c_str(), art_kind)
+        : internal::extract_thumbnail_jpeg(reader.value(), max_dimension, width, height);
     if (!jpeg) {
         return jpeg.error();
+    }
+    // A failed read must not replace a thumbnail we already kept. The next
+    // open tries the cover again. A confirmed "no art" is stored as the note
+    // so the gallery does not probe that song on every visit.
+    if (audio && art_kind < 0) {
+        auto existing = database.query_thumbnail(video_id);
+        if (existing) {
+            auto thumbnail_key = internal::derive_subkey(
+                master_key, kThumbnailSubkeyId, kThumbnailContext);
+            if (!thumbnail_key) {
+                return thumbnail_key.error();
+            }
+            auto decrypted = internal::decrypt_xchacha20_poly1305(
+                existing.value().ciphertext, thumbnail_ad(video_id, row.value()),
+                existing.value().nonce, thumbnail_key.value(), VaultErrorCode::PackageModified);
+            if (!decrypted) {
+                return decrypted.error();
+            }
+            ThumbnailInfo info;
+            info.video_id = video_id;
+            info.width = existing.value().width;
+            info.height = existing.value().height;
+            info.mime = existing.value().mime;
+            info.bytes = std::move(decrypted.value());
+            return info;
+        }
     }
 
     auto thumbnail_key = internal::derive_subkey(
@@ -153,7 +287,13 @@ Result<ThumbnailInfo> generate_thumbnail_locked(
     }
     const auto ad = thumbnail_ad(video_id, row.value());
     internal::ThumbnailRow stored;
-    stored.mime = "image/jpeg";
+    if (audio && art_kind == 0) {
+        stored.mime = "image/x-mvp-note";
+    } else if (audio && art_kind > 0) {
+        stored.mime = "image/cover";
+    } else {
+        stored.mime = "image/jpeg";
+    }
     stored.width = width;
     stored.height = height;
     internal::random_bytes(stored.nonce);
@@ -511,12 +651,21 @@ Argon2Parameters Vault::kdf_parameters() const noexcept {
 
 Result<std::int64_t> Vault::import_file(
     const std::filesystem::path& source_path,
-    const std::function<void(double)>& progress) {
+    const std::function<void(double)>& progress,
+    const std::int64_t folder_id) {
     std::lock_guard<std::mutex> guard(*mutex_);
     if (!impl_) {
         return locked_error();
     }
     auto& impl = *impl_;
+    if (folder_id > 0) {
+        auto folder = impl.database_.query_folder(folder_id);
+        if (!folder) {
+            return folder.error();
+        }
+    } else if (folder_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
     std::error_code error;
     if (!std::filesystem::is_regular_file(source_path, error)) {
         if (error) {
@@ -620,6 +769,7 @@ Result<std::int64_t> Vault::import_file(
     row.package_id = written.value().package_id;
     row.imported_at = static_cast<std::uint64_t>(std::chrono::duration_cast<
         std::chrono::seconds>(std::chrono::system_clock::now().time_since_epoch()).count());
+    row.folder_id = folder_id > 0 ? folder_id : 0;
 
     internal::WrappedVideoKey key;
     internal::random_bytes(key.nonce);
@@ -672,6 +822,7 @@ Result<std::vector<VideoInfo>> Vault::list_videos() const {
         info.package_sha256 = row.package_sha256;
         info.package_relative_path = row.package_relative_path;
         info.imported_at = row.imported_at;
+        info.folder_id = row.folder_id;
         info.tags = row.tag_names;
         videos.push_back(std::move(info));
     }
@@ -750,11 +901,18 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
     if (!impl_) {
         return locked_error();
     }
+    auto row = impl_->database_.query_video(video_id);
+    if (!row) {
+        return row.error();
+    }
     auto reader = open_package_reader(root_, impl_->database_, impl_->master_key_, video_id);
     if (!reader) {
         return reader.error();
     }
-    auto probe = internal::probe_media(reader.value());
+    const auto hint = audio_open_hint(row.value().display_name);
+    auto probe = is_audio_display_name(row.value().display_name)
+        ? internal::probe_audio_media(reader.value(), hint.c_str())
+        : internal::probe_media(reader.value());
     if (!probe) {
         return probe.error();
     }
@@ -765,6 +923,8 @@ Result<MediaInfo> Vault::media_info(const std::int64_t video_id) const {
     info.height = probe.value().height;
     info.rotation_degrees = probe.value().rotation_degrees;
     info.codec_name = probe.value().codec_name;
+    info.title = probe.value().title;
+    info.artist = probe.value().artist;
     return info;
 }
 
@@ -809,6 +969,70 @@ Result<ThumbnailInfo> Vault::thumbnail(const std::int64_t video_id) const {
     info.width = row.value().width;
     info.height = row.value().height;
     info.mime = row.value().mime;
+    info.bytes = std::move(decrypted.value());
+    return info;
+}
+
+Result<ThumbnailInfo> Vault::display_thumbnail(
+    const std::int64_t video_id,
+    const std::uint32_t max_dimension) const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& impl = *impl_;
+    auto video_row = impl.database_.query_video(video_id);
+    if (!video_row) {
+        return video_row.error();
+    }
+    auto stored = impl.database_.query_thumbnail(video_id);
+    const bool audio = is_audio_display_name(video_row.value().display_name);
+    const bool settled = stored && (stored.value().mime == "image/cover"
+        || stored.value().mime == "image/x-mvp-note");
+    if (stored && (!audio || settled)) {
+        auto thumbnail_key = internal::derive_subkey(
+            impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+        if (!thumbnail_key) {
+            return thumbnail_key.error();
+        }
+        auto decrypted = internal::decrypt_xchacha20_poly1305(
+            stored.value().ciphertext, thumbnail_ad(video_id, video_row.value()),
+            stored.value().nonce, thumbnail_key.value(), VaultErrorCode::PackageModified);
+        if (!decrypted) {
+            return decrypted.error();
+        }
+        ThumbnailInfo info;
+        info.video_id = video_id;
+        info.width = stored.value().width;
+        info.height = stored.value().height;
+        info.mime = stored.value().mime;
+        info.bytes = std::move(decrypted.value());
+        return info;
+    }
+    auto generated = generate_thumbnail_locked(
+        root_, impl.database_, impl.master_key_, video_id, max_dimension);
+    if (generated) {
+        return generated;
+    }
+    if (!stored) {
+        return generated.error();
+    }
+    auto thumbnail_key = internal::derive_subkey(
+        impl.master_key_, kThumbnailSubkeyId, kThumbnailContext);
+    if (!thumbnail_key) {
+        return thumbnail_key.error();
+    }
+    auto decrypted = internal::decrypt_xchacha20_poly1305(
+        stored.value().ciphertext, thumbnail_ad(video_id, video_row.value()),
+        stored.value().nonce, thumbnail_key.value(), VaultErrorCode::PackageModified);
+    if (!decrypted) {
+        return decrypted.error();
+    }
+    ThumbnailInfo info;
+    info.video_id = video_id;
+    info.width = stored.value().width;
+    info.height = stored.value().height;
+    info.mime = stored.value().mime;
     info.bytes = std::move(decrypted.value());
     return info;
 }
@@ -1027,6 +1251,198 @@ Result<bool> Vault::remove_video(const std::int64_t video_id) {
         return filesystem_error(error, "remove package file");
     }
     return true;
+}
+
+Result<std::vector<FolderInfo>> Vault::list_folders() const {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto rows = impl_->database_.list_folders();
+    if (!rows) {
+        return rows.error();
+    }
+    std::vector<FolderInfo> folders;
+    folders.reserve(rows.value().size());
+    for (const auto& row : rows.value()) {
+        FolderInfo info;
+        info.id = row.id;
+        info.parent_id = row.parent_id;
+        info.name = row.name;
+        info.created_at = row.created_at;
+        folders.push_back(std::move(info));
+    }
+    return folders;
+}
+
+Result<std::int64_t> Vault::create_folder(
+    const std::int64_t parent_id,
+    const std::string_view name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto normalized = normalize_entry_name(name);
+    if (normalized.empty()) {
+        return name_rejected();
+    }
+    auto& database = impl_->database_;
+    if (parent_id > 0) {
+        auto parent = database.query_folder(parent_id);
+        if (!parent) {
+            return parent.error();
+        }
+    } else if (parent_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    auto taken = database.name_taken(parent_id, normalized, 0, 0);
+    if (!taken) {
+        return taken.error();
+    }
+    if (taken.value()) {
+        return name_taken();
+    }
+    return database.insert_folder(parent_id, normalized);
+}
+
+Result<bool> Vault::rename_folder(
+    const std::int64_t folder_id,
+    const std::string_view name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto normalized = normalize_entry_name(name);
+    if (normalized.empty()) {
+        return name_rejected();
+    }
+    auto& database = impl_->database_;
+    auto folder = database.query_folder(folder_id);
+    if (!folder) {
+        return folder.error();
+    }
+    if (folder.value().name == normalized) {
+        return true;
+    }
+    auto taken = database.name_taken(folder.value().parent_id, normalized, folder_id, 0);
+    if (!taken) {
+        return taken.error();
+    }
+    if (taken.value()) {
+        return name_taken();
+    }
+    return database.rename_folder_row(folder_id, normalized);
+}
+
+Result<bool> Vault::remove_folder(const std::int64_t folder_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    return impl_->database_.remove_folder_row(folder_id);
+}
+
+Result<bool> Vault::move_folder(
+    const std::int64_t folder_id,
+    const std::int64_t new_parent_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& database = impl_->database_;
+    auto folder = database.query_folder(folder_id);
+    if (!folder) {
+        return folder.error();
+    }
+    if (folder.value().parent_id == new_parent_id) {
+        return true;
+    }
+    if (new_parent_id > 0) {
+        auto parent = database.query_folder(new_parent_id);
+        if (!parent) {
+            return parent.error();
+        }
+    } else if (new_parent_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    auto all = database.list_folders();
+    if (!all) {
+        return all.error();
+    }
+    if (new_parent_id != 0 && folder_contains(all.value(), folder_id, new_parent_id)) {
+        return VaultError{VaultErrorCode::InvalidArgument,
+            "A folder can't be moved into itself."};
+    }
+    auto taken = database.name_taken(new_parent_id, folder.value().name, folder_id, 0);
+    if (!taken) {
+        return taken.error();
+    }
+    if (taken.value()) {
+        return name_taken();
+    }
+    return database.set_folder_parent(folder_id, new_parent_id);
+}
+
+Result<bool> Vault::rename_video(
+    const std::int64_t video_id,
+    const std::string_view name) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    const auto normalized = normalize_entry_name(name);
+    if (normalized.empty()) {
+        return name_rejected();
+    }
+    auto& database = impl_->database_;
+    auto video = database.query_video(video_id);
+    if (!video) {
+        return video.error();
+    }
+    if (video.value().display_name == normalized) {
+        return true;
+    }
+    auto taken = database.name_taken(video.value().folder_id, normalized, 0, video_id);
+    if (!taken) {
+        return taken.error();
+    }
+    if (taken.value()) {
+        return name_taken();
+    }
+    return database.rename_video_row(video_id, normalized);
+}
+
+Result<bool> Vault::move_video(
+    const std::int64_t video_id,
+    const std::int64_t folder_id) {
+    std::lock_guard<std::mutex> guard(*mutex_);
+    if (!impl_) {
+        return locked_error();
+    }
+    auto& database = impl_->database_;
+    auto video = database.query_video(video_id);
+    if (!video) {
+        return video.error();
+    }
+    if (video.value().folder_id == folder_id) {
+        return true;
+    }
+    if (folder_id > 0) {
+        auto folder = database.query_folder(folder_id);
+        if (!folder) {
+            return folder.error();
+        }
+    } else if (folder_id < 0) {
+        return VaultError{VaultErrorCode::InvalidArgument, "unknown folder"};
+    }
+    auto taken = database.name_taken(folder_id, video.value().display_name, 0, video_id);
+    if (!taken) {
+        return taken.error();
+    }
+    if (taken.value()) {
+        return name_taken();
+    }
+    return database.set_video_folder(video_id, folder_id);
 }
 
 Result<bool> Vault::change_password(

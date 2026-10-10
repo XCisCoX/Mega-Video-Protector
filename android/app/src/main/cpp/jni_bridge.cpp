@@ -37,11 +37,12 @@ namespace {
 std::mutex g_mutex;
 std::unique_ptr<Vault> g_vault;
 
-// Plaintext of small videos, kept while the vault is unlocked. A loop used to
-// open the package and decrypt it again on every repeat — for a clip under a
-// second that cost more than the clip itself. The first read pays for the
-// decrypt; later seeks and repeats copy from here.
-constexpr std::size_t kPlainFileCap = 12U << 20;
+// Plaintext of a very short clip, kept while the vault is unlocked. A loop
+// used to open the package and decrypt it again on every repeat. Songs and
+// anything else over this cap stay on the range reader: the first playback
+// read used to decrypt the whole file (up to 12 MiB) before a single sample
+// reached the player.
+constexpr std::size_t kPlainFileCap = 1U << 20;
 constexpr std::size_t kPlainTotalCap = 48U << 20;
 std::unordered_map<std::int64_t, std::uint64_t> g_sizes;
 std::unordered_map<std::int64_t, std::vector<unsigned char>> g_plain;
@@ -385,14 +386,32 @@ std::optional<std::vector<unsigned char>> decode_frame_at(
     raw_io->seekable = AVIO_SEEKABLE_NORMAL;
 
     auto format = open_format_with_hint(io.get(), reader, nullptr);
+    // image2 will open *any* bytes when given a ".png" name and then report
+    // no picture. A gallery JPEG that the content probe missed was accepted
+    // as that empty PNG and never tried as a JPEG, so the viewer said it
+    // could not decode a file the vault had stored intact.
+    auto has_picture = [](AVFormatContext* raw) {
+        // Dimensions only. Calling avformat_find_stream_info here and again
+        // below null-dereferences on some gallery JPEGs.
+        for (unsigned i = 0; i < raw->nb_streams; ++i) {
+            const auto* par = raw->streams[i]->codecpar;
+            if (par != nullptr && par->codec_type == AVMEDIA_TYPE_VIDEO
+                && par->width > 0 && par->height > 0) {
+                return true;
+            }
+        }
+        return false;
+    };
+    if (format && !has_picture(format.get())) format.reset();
     if (!format) {
         static const char* const kImageHints[] = {
-            "image.png", "image.jpg", "image.webp", "image.gif",
+            "image.jpg", "image.jpeg", "image.png", "image.webp", "image.gif",
             "image.bmp", "image.tiff",
         };
         for (const char* hint : kImageHints) {
             format = open_format_with_hint(io.get(), reader, hint);
-            if (format) break;
+            if (format && has_picture(format.get())) break;
+            format.reset();
         }
     }
     if (!format) return std::nullopt;
@@ -769,12 +788,30 @@ std::string videos_json() {
         char buf[512];
         std::snprintf(buf, sizeof(buf),
             "{\"id\":%lld,\"name\":\"%s\",\"size\":%llu,"
-            "\"importedAt\":%llu,\"tags\":[%s]}",
+            "\"importedAt\":%llu,\"folderId\":%lld,\"tags\":[%s]}",
             static_cast<long long>(v.id), json_escape(v.display_name).c_str(),
             static_cast<unsigned long long>(v.original_size),
             static_cast<unsigned long long>(v.imported_at),
+            static_cast<long long>(v.folder_id),
             tags.c_str());
         out += buf;
+    }
+    out += "]";
+    return out;
+}
+
+std::string folders_json() {
+    if (!g_vault) return "[]";
+    auto list = g_vault->list_folders();
+    if (!list) return "[]";
+    std::string out = "[";
+    bool first = true;
+    for (const auto& folder : list.value()) {
+        if (!first) out += ",";
+        first = false;
+        out += "{\"id\":" + std::to_string(folder.id)
+            + ",\"parentId\":" + std::to_string(folder.parent_id)
+            + ",\"name\":\"" + json_escape(folder.name) + "\"}";
     }
     out += "]";
     return out;
@@ -784,13 +821,14 @@ std::string media_info_json(std::int64_t id) {
     if (!g_vault) return "{}";
     auto info = g_vault->media_info(id);
     if (!info) return "{}";
-    char buf[256];
-    std::snprintf(buf, sizeof(buf),
-        "{\"durationMs\":%llu,\"width\":%u,\"height\":%u,\"rotation\":%u,\"codec\":\"%s\"}",
-        static_cast<unsigned long long>(info.value().duration_ms),
-        info.value().width, info.value().height, info.value().rotation_degrees,
-        json_escape(info.value().codec_name).c_str());
-    return buf;
+    const auto& media = info.value();
+    return "{\"durationMs\":" + std::to_string(media.duration_ms)
+        + ",\"width\":" + std::to_string(media.width)
+        + ",\"height\":" + std::to_string(media.height)
+        + ",\"rotation\":" + std::to_string(media.rotation_degrees)
+        + ",\"codec\":\"" + json_escape(media.codec_name) + "\""
+        + ",\"title\":\"" + json_escape(media.title) + "\""
+        + ",\"artist\":\"" + json_escape(media.artist) + "\"}";
 }
 
 std::string tags_json() {
@@ -894,12 +932,8 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeThum
     JNIEnv* env, jobject, jlong id, jint max_dimension) {
     std::lock_guard<std::mutex> lock(g_mutex);
     if (!g_vault) return nullptr;
-    auto thumb = g_vault->thumbnail(id);
-    if (!thumb) {
-        auto generated = g_vault->generate_thumbnail(id, static_cast<std::uint32_t>(max_dimension));
-        if (!generated) return nullptr;
-        thumb = std::move(generated);
-    }
+    auto thumb = g_vault->display_thumbnail(id, static_cast<std::uint32_t>(max_dimension));
+    if (!thumb) return nullptr;
     auto& bytes = thumb.value().bytes;
     jbyteArray out = env->NewByteArray(static_cast<jsize>(bytes.size()));
     if (out != nullptr) {
@@ -1015,19 +1049,8 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeRead
     if (!g_vault || size <= 0 || offset < 0) return nullptr;
     const auto video = static_cast<std::int64_t>(id);
     const auto at = static_cast<std::uint64_t>(offset);
-    if (const auto* cached = ensure_plain(*g_vault, video)) {
-        if (at >= cached->size()) {
-            return env->NewByteArray(0);
-        }
-        const auto n = std::min(
-            static_cast<std::size_t>(size), cached->size() - static_cast<std::size_t>(at));
-        jbyteArray out = env->NewByteArray(static_cast<jsize>(n));
-        if (out != nullptr && n > 0U) {
-            env->SetByteArrayRegion(out, 0, static_cast<jsize>(n),
-                reinterpret_cast<const jbyte*>(cached->data() + static_cast<std::size_t>(at)));
-        }
-        return out;
-    }
+    // Stream this window only. Caching the whole song here made play wait
+    // until every chunk was decrypted.
     auto bytes = g_vault->read_video_range(video, at, static_cast<std::size_t>(size));
     if (!bytes) return nullptr;
     auto& data = bytes.value();
@@ -1052,6 +1075,77 @@ JNIEXPORT jbyteArray JNICALL Java_org_megavideoprotect_app_CoreBridge_nativeLoop
             reinterpret_cast<const jbyte*>(bytes->data()));
     }
     return out;
+}
+
+JNI_METHOD(nativeListFolders)(JNIEnv* env, jobject) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    return to_jstring(env, folders_json());
+}
+
+JNI_METHOD(nativeCreateFolder)(JNIEnv* env, jobject, jlong parent_id, jstring name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string n = jstring_to_string(env, name);
+    auto result = g_vault->create_folder(static_cast<std::int64_t>(parent_id), n);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"id\":%lld", static_cast<long long>(result.value()));
+    return to_jstring(env, ok_json(buf));
+}
+
+JNI_METHOD(nativeRenameFolder)(JNIEnv* env, jobject, jlong id, jstring name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string n = jstring_to_string(env, name);
+    auto result = g_vault->rename_folder(static_cast<std::int64_t>(id), n);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeRemoveFolder)(JNIEnv* env, jobject, jlong id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    auto result = g_vault->remove_folder(static_cast<std::int64_t>(id));
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeMoveFolder)(JNIEnv* env, jobject, jlong id, jlong parent_id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    auto result = g_vault->move_folder(
+        static_cast<std::int64_t>(id), static_cast<std::int64_t>(parent_id));
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeRenameVideo)(JNIEnv* env, jobject, jlong id, jstring name) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string n = jstring_to_string(env, name);
+    auto result = g_vault->rename_video(static_cast<std::int64_t>(id), n);
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeMoveVideo)(JNIEnv* env, jobject, jlong id, jlong folder_id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    auto result = g_vault->move_video(
+        static_cast<std::int64_t>(id), static_cast<std::int64_t>(folder_id));
+    if (!result) return to_jstring(env, err_json(result.error()));
+    return to_jstring(env, ok_json());
+}
+
+JNI_METHOD(nativeImportInto)(JNIEnv* env, jobject, jstring path, jlong folder_id) {
+    std::lock_guard<std::mutex> lock(g_mutex);
+    if (!g_vault) return to_jstring(env, err_msg("Vault is not open"));
+    const std::string p = jstring_to_string(env, path);
+    auto result = g_vault->import_file(p, {}, static_cast<std::int64_t>(folder_id));
+    if (!result) return to_jstring(env, err_json(result.error()));
+    char buf[64];
+    std::snprintf(buf, sizeof(buf), "\"id\":%lld", static_cast<long long>(result.value()));
+    return to_jstring(env, ok_json(buf));
 }
 
 JNI_METHOD(nativeClose)(JNIEnv* env, jobject) {

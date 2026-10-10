@@ -14,6 +14,7 @@ extern "C" {
 }
 
 #include <algorithm>
+#include <cstddef>
 #include <cstdint>
 #include <cstdio>
 #include <memory>
@@ -217,25 +218,33 @@ Result<FormatHandle> open_format(PackageReader& reader) {
     // the image attempts below supersede it.
     const VaultError first_error = container.error();
     static const char* const kImageHints[] = {
-        "image.png", "image.jpg", "image.webp", "image.gif",
+        "image.jpg", "image.jpeg", "image.png", "image.webp", "image.gif",
         "image.bmp", "image.tiff", "image.avif", "image.heic",
     };
     for (const char* hint : kImageHints) {
         auto as_image = try_open_format(reader, hint);
-        if (as_image) {
+        if (!as_image) {
+            continue;
+        }
+        // The PNG demuxer accepts a ".png" name for bytes that are not a PNG
+        // and leaves the size unset. Do not probe here: a second
+        // avformat_find_stream_info on that context crashes. Skip a hint that
+        // did not already report a picture so a JPEG still gets a turn.
+        AVFormatContext* format = as_image.value().format.get();
+        bool pictured = false;
+        for (unsigned int index = 0U; index < format->nb_streams; ++index) {
+            const AVCodecParameters* par = format->streams[index]->codecpar;
+            if (par != nullptr && par->codec_type == AVMEDIA_TYPE_VIDEO
+                && par->width > 0 && par->height > 0) {
+                pictured = true;
+                break;
+            }
+        }
+        if (pictured) {
             return as_image;
         }
     }
     return first_error;
-}
-
-AVStream* first_video_stream(AVFormatContext* format) {
-    for (unsigned int index = 0U; index < format->nb_streams; ++index) {
-        if (format->streams[index]->codecpar->codec_type == AVMEDIA_TYPE_VIDEO) {
-            return format->streams[index];
-        }
-    }
-    return nullptr;
 }
 
 std::uint64_t duration_milliseconds(AVFormatContext* format, AVStream* stream) {
@@ -271,14 +280,88 @@ Result<AVStream*> find_video_stream(AVFormatContext* format) {
     if (status < 0) {
         return media_error("read stream information", status);
     }
-    AVStream* stream = first_video_stream(format);
-    if (stream == nullptr || stream->codecpar->width <= 0 || stream->codecpar->height <= 0) {
-        // image2 will claim a ".png" name for any bytes once the PNG decoder
-        // exists, then leave the size unset. That is not a picture.
-        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
-            "the media container has no video stream"};
+    for (unsigned int index = 0U; index < format->nb_streams; ++index) {
+        AVStream* candidate = format->streams[index];
+        if (candidate->codecpar == nullptr
+            || candidate->codecpar->codec_type != AVMEDIA_TYPE_VIDEO) {
+            continue;
+        }
+        // An embedded album cover is a video packet, not a movie.
+        if ((candidate->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) {
+            continue;
+        }
+        if (candidate->codecpar->width <= 0 || candidate->codecpar->height <= 0) {
+            continue;
+        }
+        return candidate;
     }
-    return stream;
+    // image2 will claim a ".png" name for any bytes once the PNG decoder
+    // exists, then leave the size unset. That is not a picture.
+    return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+        "the media container has no video stream"};
+}
+
+AVStream* find_audio_stream(AVFormatContext* format) {
+    for (unsigned int index = 0U; index < format->nb_streams; ++index) {
+        AVStream* candidate = format->streams[index];
+        if (candidate == nullptr || candidate->codecpar == nullptr) {
+            continue;
+        }
+        if (candidate->codecpar->codec_type == AVMEDIA_TYPE_AUDIO) {
+            return candidate;
+        }
+    }
+    return nullptr;
+}
+
+// Decodes the embedded album picture (ID3 APIC and friends). The packet lives
+// on the stream, so it must not be unreferenced.
+Result<AvFramePtr> decode_attached_cover(AVFormatContext* format) {
+    AVStream* cover = nullptr;
+    for (unsigned int index = 0U; index < format->nb_streams; ++index) {
+        AVStream* candidate = format->streams[index];
+        if (candidate == nullptr || candidate->codecpar == nullptr) {
+            continue;
+        }
+        if (candidate->codecpar->codec_type == AVMEDIA_TYPE_VIDEO
+            && (candidate->disposition & AV_DISPOSITION_ATTACHED_PIC) != 0) {
+            cover = candidate;
+            break;
+        }
+    }
+    if (cover == nullptr || cover->attached_pic.data == nullptr
+        || cover->attached_pic.size <= 0) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "the audio file has no embedded cover"};
+    }
+    const AVCodec* decoder = avcodec_find_decoder(cover->codecpar->codec_id);
+    if (decoder == nullptr) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "no decoder is available for the cover art"};
+    }
+    AvCodecPtr codec(avcodec_alloc_context3(decoder));
+    if (!codec) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg decoder context"};
+    }
+    int status = avcodec_parameters_to_context(codec.get(), cover->codecpar);
+    if (status < 0 || avcodec_open2(codec.get(), decoder, nullptr) < 0) {
+        return media_error("open cover decoder", status);
+    }
+    status = avcodec_send_packet(codec.get(), &cover->attached_pic);
+    if (status < 0) {
+        return media_error("send cover packet", status);
+    }
+    AvFramePtr frame(av_frame_alloc());
+    if (!frame) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg frame"};
+    }
+    status = avcodec_receive_frame(codec.get(), frame.get());
+    if (status < 0) {
+        return media_error("decode cover art", status);
+    }
+    return frame;
 }
 
 // Seeks to roughly 30% into the stream and decodes the next video frame.
@@ -715,6 +798,90 @@ Result<std::vector<unsigned char>> encode_jpeg(
     return jpeg;
 }
 
+void paint_rgb(AVFrame* frame, const int x, const int y,
+    const unsigned char r, const unsigned char g, const unsigned char b) {
+    if (x < 0 || y < 0 || x >= frame->width || y >= frame->height) {
+        return;
+    }
+    auto* pixel = frame->data[0] + static_cast<std::ptrdiff_t>(y) * frame->linesize[0]
+        + static_cast<std::ptrdiff_t>(x) * 3;
+    pixel[0] = r;
+    pixel[1] = g;
+    pixel[2] = b;
+}
+
+void fill_rect(AVFrame* frame, const int x0, const int y0, const int x1, const int y1,
+    const unsigned char r, const unsigned char g, const unsigned char b) {
+    for (int y = y0; y < y1; ++y) {
+        for (int x = x0; x < x1; ++x) {
+            paint_rgb(frame, x, y, r, g, b);
+        }
+    }
+}
+
+void fill_ellipse(AVFrame* frame, const int cx, const int cy, const int rx, const int ry,
+    const unsigned char r, const unsigned char g, const unsigned char b) {
+    if (rx <= 0 || ry <= 0) {
+        return;
+    }
+    const int rx2 = rx * rx;
+    const int ry2 = ry * ry;
+    for (int y = cy - ry; y <= cy + ry; ++y) {
+        for (int x = cx - rx; x <= cx + rx; ++x) {
+            const int dx = x - cx;
+            const int dy = y - cy;
+            if (dx * dx * ry2 + dy * dy * rx2 <= rx2 * ry2) {
+                paint_rgb(frame, x, y, r, g, b);
+            }
+        }
+    }
+}
+
+// Square cover used when a song has no embedded album art.
+Result<std::vector<unsigned char>> music_note_jpeg(
+    const std::uint32_t max_dimension,
+    std::uint32_t& out_width,
+    std::uint32_t& out_height) {
+    std::uint32_t side = max_dimension == 0U ? 320U : std::min<std::uint32_t>(max_dimension, 720U);
+    if (side < 64U) {
+        side = 64U;
+    }
+    side = even_jpeg_dimension(side);
+    AvFramePtr frame(av_frame_alloc());
+    if (!frame) {
+        return VaultError{VaultErrorCode::CryptoFailure,
+            "unable to allocate FFmpeg frame"};
+    }
+    frame->format = AV_PIX_FMT_RGB24;
+    frame->width = static_cast<int>(side);
+    frame->height = static_cast<int>(side);
+    frame->color_range = AVCOL_RANGE_JPEG;
+    const int status = av_frame_get_buffer(frame.get(), 0);
+    if (status < 0) {
+        return media_error("allocate music thumbnail", status);
+    }
+    const int s = static_cast<int>(side);
+    fill_rect(frame.get(), 0, 0, s, s, 28, 28, 30);
+    const auto px = [s](const double fraction) {
+        return static_cast<int>(fraction * static_cast<double>(s));
+    };
+    const unsigned char br = 51;
+    const unsigned char bg = 144;
+    const unsigned char bb = 236;
+    fill_ellipse(frame.get(), px(0.38), px(0.70), std::max(1, px(0.13)), std::max(1, px(0.09)), br, bg, bb);
+    fill_ellipse(frame.get(), px(0.68), px(0.62), std::max(1, px(0.13)), std::max(1, px(0.09)), br, bg, bb);
+    fill_rect(frame.get(), px(0.48), px(0.22), px(0.53), px(0.70), br, bg, bb);
+    fill_rect(frame.get(), px(0.78), px(0.16), px(0.83), px(0.62), br, bg, bb);
+    fill_rect(frame.get(), px(0.48), px(0.20), px(0.83), px(0.28), br, bg, bb);
+    auto jpeg = encode_jpeg(frame.get(), side, side);
+    if (!jpeg) {
+        return jpeg.error();
+    }
+    out_width = side;
+    out_height = side;
+    return jpeg;
+}
+
 } // namespace
 
 Result<MediaProbeResult> probe_media(PackageReader& reader) {
@@ -724,16 +891,74 @@ Result<MediaProbeResult> probe_media(PackageReader& reader) {
     }
     AVFormatContext* format = handle.value().format.get();
     auto stream = find_video_stream(format);
-    if (!stream) {
+    if (stream) {
+        AVStream* video = stream.value();
+        MediaProbeResult result;
+        result.duration_ms = duration_milliseconds(format, video);
+        result.width = static_cast<std::uint32_t>(video->codecpar->width);
+        result.height = static_cast<std::uint32_t>(video->codecpar->height);
+        result.rotation_degrees = stream_rotation(video);
+        result.codec_name = avcodec_get_name(video->codecpar->codec_id);
+        return result;
+    }
+    AVStream* audio = find_audio_stream(format);
+    if (audio == nullptr) {
         return stream.error();
     }
-    AVStream* video = stream.value();
     MediaProbeResult result;
-    result.duration_ms = duration_milliseconds(format, video);
-    result.width = static_cast<std::uint32_t>(video->codecpar->width);
-    result.height = static_cast<std::uint32_t>(video->codecpar->height);
-    result.rotation_degrees = stream_rotation(video);
-    result.codec_name = avcodec_get_name(video->codecpar->codec_id);
+    result.duration_ms = duration_milliseconds(format, audio);
+    result.codec_name = avcodec_get_name(audio->codecpar->codec_id);
+    return result;
+}
+
+Result<MediaProbeResult> probe_audio_media(PackageReader& reader, const char* name_hint) {
+    const char* hint = (name_hint != nullptr && name_hint[0] != '\0') ? name_hint : "audio.mp3";
+    auto handle = try_open_format(reader, hint);
+    if (!handle) {
+        return handle.error();
+    }
+    AVFormatContext* format = handle.value().format.get();
+    // These are format limits, not per-stream codec options. Passing one
+    // dictionary as the options array makes FFmpeg index options[stream]
+    // and walk off the stack as soon as a song has a second stream (the
+    // embedded cover). That crashed a drop of many tagged music files.
+    format->probesize = 262144;
+    format->max_analyze_duration = 500000;
+    const int info = avformat_find_stream_info(format, nullptr);
+    if (info < 0) {
+        return media_error("read audio information", info);
+    }
+    AVStream* audio = find_audio_stream(format);
+    if (audio == nullptr) {
+        return VaultError{VaultErrorCode::UnsupportedVideoFormat,
+            "the media container has no audio stream"};
+    }
+    MediaProbeResult result;
+    result.duration_ms = duration_milliseconds(format, audio);
+    result.codec_name = avcodec_get_name(audio->codecpar->codec_id);
+    const auto read_tag = [](AVDictionary* dict, const char* const* keys) {
+        if (dict == nullptr) {
+            return std::string();
+        }
+        for (const char* const* key = keys; *key != nullptr; ++key) {
+            const AVDictionaryEntry* entry = av_dict_get(dict, *key, nullptr, 0);
+            if (entry != nullptr && entry->value != nullptr && entry->value[0] != '\0') {
+                return std::string(entry->value);
+            }
+        }
+        return std::string();
+    };
+    static const char* const kTitle[] = {"title", "TIT2", nullptr};
+    static const char* const kArtist[] = {
+        "artist", "album_artist", "performer", "TPE1", "TPE2", nullptr};
+    result.title = read_tag(format->metadata, kTitle);
+    result.artist = read_tag(format->metadata, kArtist);
+    if (result.title.empty()) {
+        result.title = read_tag(audio->metadata, kTitle);
+    }
+    if (result.artist.empty()) {
+        result.artist = read_tag(audio->metadata, kArtist);
+    }
     return result;
 }
 
@@ -749,7 +974,29 @@ Result<std::vector<unsigned char>> extract_thumbnail_jpeg(
     AVFormatContext* format = handle.value().format.get();
     auto stream = find_video_stream(format);
     if (!stream) {
-        return stream.error();
+        auto cover = decode_attached_cover(format);
+        if (!cover) {
+            if (find_audio_stream(format) != nullptr) {
+                return music_note_jpeg(max_dimension, out_width, out_height);
+            }
+            return stream.error();
+        }
+        auto dimensions = scaled_dimensions(
+            static_cast<std::uint32_t>(cover.value()->width),
+            static_cast<std::uint32_t>(cover.value()->height),
+            max_dimension);
+        if (!dimensions) {
+            return dimensions.error();
+        }
+        const auto jpeg_width = even_jpeg_dimension(dimensions.value().first);
+        const auto jpeg_height = even_jpeg_dimension(dimensions.value().second);
+        auto jpeg = encode_jpeg(cover.value().get(), jpeg_width, jpeg_height);
+        if (!jpeg) {
+            return jpeg.error();
+        }
+        out_width = jpeg_width;
+        out_height = jpeg_height;
+        return jpeg;
     }
     auto frame = decode_representative_frame(format, stream.value());
     if (!frame) {
@@ -785,6 +1032,55 @@ Result<std::vector<unsigned char>> extract_thumbnail_jpeg(
     if (!jpeg) {
         return jpeg.error();
     }
+    out_width = jpeg_width;
+    out_height = jpeg_height;
+    return jpeg;
+}
+
+Result<std::vector<unsigned char>> extract_audio_thumbnail_jpeg(
+    PackageReader& reader,
+    const std::uint32_t max_dimension,
+    std::uint32_t& out_width,
+    std::uint32_t& out_height,
+    const char* name_hint,
+    int& art_kind) {
+    art_kind = -1;
+    auto note = [&]() {
+        return music_note_jpeg(max_dimension, out_width, out_height);
+    };
+    const char* hint = (name_hint != nullptr && name_hint[0] != '\0') ? name_hint : "audio.mp3";
+    auto handle = try_open_format(reader, hint);
+    if (!handle) {
+        return note();
+    }
+    AVFormatContext* format = handle.value().format.get();
+    // Same constraint as probe_audio_media: one dictionary is not an
+    // nb_streams-long options array. A cover art stream made this crash.
+    format->probesize = 1048576;
+    format->max_analyze_duration = 500000;
+    const int info = avformat_find_stream_info(format, nullptr);
+    if (info < 0) {
+        return note();
+    }
+    auto cover = decode_attached_cover(format);
+    if (!cover) {
+        art_kind = 0;
+        return note();
+    }
+    auto dimensions = scaled_dimensions(
+        static_cast<std::uint32_t>(cover.value()->width),
+        static_cast<std::uint32_t>(cover.value()->height),
+        max_dimension);
+    if (!dimensions) {
+        return note();
+    }
+    const auto jpeg_width = even_jpeg_dimension(dimensions.value().first);
+    const auto jpeg_height = even_jpeg_dimension(dimensions.value().second);
+    auto jpeg = encode_jpeg(cover.value().get(), jpeg_width, jpeg_height);
+    if (!jpeg) {
+        return note();
+    }
+    art_kind = 1;
     out_width = jpeg_width;
     out_height = jpeg_height;
     return jpeg;

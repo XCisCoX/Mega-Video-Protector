@@ -1,6 +1,8 @@
 package org.megavideoprotect.app
 
+import android.content.Intent
 import android.graphics.drawable.ColorDrawable
+import android.net.Uri
 import android.os.Build
 import android.view.WindowManager
 import androidx.compose.foundation.background
@@ -40,6 +42,7 @@ import androidx.compose.ui.graphics.SolidColor
 import androidx.compose.ui.platform.LocalContext
 import androidx.compose.ui.platform.LocalView
 import androidx.compose.ui.text.TextStyle
+import androidx.compose.ui.text.style.TextAlign
 import androidx.compose.ui.text.font.FontWeight
 import androidx.compose.ui.text.input.PasswordVisualTransformation
 import androidx.compose.ui.text.input.VisualTransformation
@@ -310,6 +313,24 @@ fun SettingsDialog(
                             }
                         }
                     }
+
+                    Text(
+                        "github.com/XCisCoX/Mega-Vault-Protector",
+                        color = Mvp.description,
+                        fontSize = 12.sp,
+                        textAlign = TextAlign.Center,
+                        modifier = Modifier
+                            .fillMaxWidth()
+                            .clickable {
+                                context.startActivity(
+                                    Intent(
+                                        Intent.ACTION_VIEW,
+                                        Uri.parse("https://github.com/XCisCoX/Mega-Vault-Protector"),
+                                    )
+                                )
+                            }
+                            .padding(top = 4.dp, bottom = 8.dp),
+                    )
                 }
             }
         }

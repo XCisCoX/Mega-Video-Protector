@@ -224,12 +224,30 @@ QByteArray videosJson(core::Vault& vault) {
             tags += QLatin1Char('"') + jsonEscape(tag) + QLatin1Char('"');
         }
         tags += QLatin1Char(']');
-        out += QStringLiteral("{\"id\":%1,\"name\":\"%2\",\"size\":%3,\"importedAt\":%4,\"tags\":%5}")
+        out += QStringLiteral("{\"id\":%1,\"name\":\"%2\",\"size\":%3,\"importedAt\":%4,\"folderId\":%5,\"tags\":%6}")
             .arg(video.id)
             .arg(jsonEscape(video.display_name))
             .arg(static_cast<qulonglong>(video.original_size))
             .arg(static_cast<qulonglong>(video.imported_at))
+            .arg(static_cast<qlonglong>(video.folder_id))
             .arg(tags);
+    }
+    out += QLatin1Char(']');
+    return out.toUtf8();
+}
+
+QByteArray foldersJson(core::Vault& vault) {
+    auto list = vault.list_folders();
+    if (!list) return {};
+    QString out = QStringLiteral("[");
+    bool first = true;
+    for (const auto& folder : list.value()) {
+        if (!first) out += QLatin1Char(',');
+        first = false;
+        out += QStringLiteral("{\"id\":%1,\"parentId\":%2,\"name\":\"%3\"}")
+            .arg(folder.id)
+            .arg(folder.parent_id)
+            .arg(jsonEscape(folder.name));
     }
     out += QLatin1Char(']');
     return out.toUtf8();
@@ -549,6 +567,15 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
         ReplyWriter::send(socket, 200, "OK", "application/json", body);
         return;
     }
+    if (request.path == QStringLiteral("/v1/folders")) {
+        const QByteArray body = foldersJson(*vault);
+        if (body.isEmpty()) {
+            ReplyWriter::send(socket, 500, "Error", "text/plain", "folders failed");
+            return;
+        }
+        ReplyWriter::send(socket, 200, "OK", "application/json", body);
+        return;
+    }
     if (request.path == QStringLiteral("/v1/tags")) {
         const QByteArray body = tagsJson(*vault);
         if (body.isEmpty()) {
@@ -593,12 +620,14 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
         }
         const auto& media = info.value();
         const QByteArray body = QStringLiteral(
-            "{\"durationMs\":%1,\"width\":%2,\"height\":%3,\"rotation\":%4,\"codec\":\"%5\"}")
+            "{\"durationMs\":%1,\"width\":%2,\"height\":%3,\"rotation\":%4,\"codec\":\"%5\",\"title\":\"%6\",\"artist\":\"%7\"}")
             .arg(static_cast<qulonglong>(media.duration_ms))
             .arg(media.width)
             .arg(media.height)
             .arg(media.rotation_degrees)
             .arg(jsonEscape(media.codec_name))
+            .arg(jsonEscape(media.title))
+            .arg(jsonEscape(media.artist))
             .toUtf8();
         ReplyWriter::send(socket, 200, "OK", "application/json", body);
         return;
@@ -608,10 +637,7 @@ void handleClient(TlsChannel* socket, const std::shared_ptr<ShareServer::State>&
         int maxDimension = request.query.queryItemValue(QStringLiteral("max")).toInt(&ok);
         if (!ok) maxDimension = 320;
         maxDimension = qBound(64, maxDimension, 720);
-        auto thumb = vault->thumbnail(id);
-        if (!thumb || thumb.value().bytes.empty()) {
-            thumb = vault->generate_thumbnail(id, static_cast<std::uint32_t>(maxDimension));
-        }
+        auto thumb = vault->display_thumbnail(id, static_cast<std::uint32_t>(maxDimension));
         if (!thumb || thumb.value().bytes.empty()) {
             ReplyWriter::send(socket, 404, "Not Found", "text/plain", "no thumbnail");
             return;
@@ -911,7 +937,7 @@ void ShareServer::showDialog(QWidget* parent) {
     layout->addLayout(titleRow);
 
     auto* intro = new QLabel(QStringLiteral(
-        "Scan with Mega Video Protect on your phone, then enter the vault password. "
+        "Scan with Mega Vault Protect on your phone, then enter the vault password. "
         "Use the same Wi-Fi. Locking this PC does not stop sharing."), sheet);
     intro->setWordWrap(true);
     QFont bodyFont(QStringLiteral("Segoe UI"));

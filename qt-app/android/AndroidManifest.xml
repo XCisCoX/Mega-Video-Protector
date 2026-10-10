@@ -1,8 +1,8 @@
 <?xml version="1.0" encoding="utf-8"?>
-<!-- Android package manifest for Mega Video Protect (Qt 5.15 + NDK arm64-v8a).
+<!-- Android package manifest for Mega Vault Protect (Qt 5.15 + NDK arm64-v8a).
      The vault lives in the app-private sandbox; no storage permissions are
      needed. android.app.lib_name must match the CMake OUTPUT_NAME of the app
-     shared library (libMegaVideoProtect.so). -->
+     shared library (libMegaVaultProtect.so). -->
 <manifest xmlns:android="http://schemas.android.com/apk/res/android"
     package="org.megavideoprotect.app"
     android:versionName="1.0.0"
@@ -12,20 +12,20 @@
     <uses-sdk android:minSdkVersion="26" android:targetSdkVersion="29"/>
 
     <application
-        android:label="Mega Video Protect"
+        android:label="Mega Vault Protect"
         android:icon="@mipmap/icon"
         android:theme="@android:style/Theme.NoTitleBar">
 
         <activity
             android:name="org.qtproject.qt5.android.bindings.QtActivity"
-            android:label="Mega Video Protect"
+            android:label="Mega Vault Protect"
             android:screenOrientation="unspecified"
             android:configChanges="orientation|uiMode|screenLayout|screenSize|smallestScreenSize|layoutDirection|locale|fontScale|keyboard|keyboardHidden|navigation|mcc|mnc|density">
             <intent-filter>
                 <action android:name="android.intent.action.MAIN"/>
                 <category android:name="android.intent.category.LAUNCHER"/>
             </intent-filter>
-            <meta-data android:name="android.app.lib_name" android:value="MegaVideoProtect"/>
+            <meta-data android:name="android.app.lib_name" android:value="MegaVaultProtect"/>
             <meta-data android:name="android.app.arguments" android:value=""/>
             <!-- Bundled deployment: the QtLoader reads these meta-data keys to
                  decide between bundled libs and the (long-dead) Ministro

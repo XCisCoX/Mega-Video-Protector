@@ -6,6 +6,7 @@
 #include <QCoreApplication>
 #include <QFont>
 #include <QIcon>
+#include <QSettings>
 #include <QString>
 
 int main(int argc, char* argv[]) {
@@ -13,8 +14,20 @@ int main(int argc, char* argv[]) {
     QCoreApplication::setAttribute(Qt::AA_UseHighDpiPixmaps);
 
     QApplication application(argc, argv);
-    application.setApplicationName(QStringLiteral("Mega Video Protect"));
-    application.setOrganizationName(QStringLiteral("Mega Video Protect"));
+    application.setApplicationName(QStringLiteral("Mega Vault Protect"));
+    application.setOrganizationName(QStringLiteral("Mega Vault Protect"));
+    // The previous name stored the vault path and gallery preferences.
+    // Copy them once so an existing install still opens the same vault.
+    {
+        QSettings current;
+        QSettings previous(QStringLiteral("Mega Video Protect"), QStringLiteral("Mega Video Protect"));
+        const auto keys = previous.allKeys();
+        for (const QString& key : keys) {
+            if (!current.contains(key)) {
+                current.setValue(key, previous.value(key));
+            }
+        }
+    }
     const auto version = videovault::core::version();
     application.setApplicationVersion(QString::fromLatin1(
         version.data(), static_cast<int>(version.size())));

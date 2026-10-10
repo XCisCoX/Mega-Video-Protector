@@ -4,6 +4,7 @@
 
 #include <algorithm>
 #include <atomic>
+#include <memory>
 #include <mutex>
 #include <thread>
 #include <unordered_map>
@@ -66,7 +67,8 @@ BatchWorker::BatchWorker(QObject* parent)
 
 void BatchWorker::importFiles(
     std::shared_ptr<std::vector<std::filesystem::path>> sources,
-    std::shared_ptr<videovault::core::Vault> vault) {
+    std::shared_ptr<videovault::core::Vault> vault,
+    const std::int64_t folder_id) {
     // Size pass first so the aggregate bar has a total (plaintext bytes).
     std::vector<std::int64_t> sizes;
     sizes.reserve(sources->size());
@@ -83,13 +85,24 @@ void BatchWorker::importFiles(
     std::atomic<int> imported{0};
     runParallel(state, sources->size(), this,
         [&](const int index) {
+            const auto reported = std::make_shared<std::atomic<std::int64_t>>(0);
             const auto outcome = vault->import_file((*sources)[index],
-                [this, state, file_size = sizes[index], total_bytes](const double fraction) {
-                    const auto added = static_cast<std::int64_t>(
-                        fraction * static_cast<double>(file_size));
-                    const auto done = state->bytes_done.fetch_add(added) + added;
-                    emit progress(done, total_bytes);
-                });
+                [this, state, reported, file_size = sizes[index], total_bytes](const double fraction) {
+                    // The core reports a cumulative fraction. Adding that
+                    // fraction on every tick counted the same bytes many
+                    // times and ran the bar off the end of a large drop.
+                    const auto clamped = std::clamp(fraction, 0.0, 1.0);
+                    const auto target = static_cast<std::int64_t>(
+                        clamped * static_cast<double>(file_size));
+                    const auto previous = reported->exchange(target);
+                    const auto delta = target - previous;
+                    if (delta <= 0) {
+                        return;
+                    }
+                    const auto done = state->bytes_done.fetch_add(delta) + delta;
+                    emit progress(std::min(done, total_bytes), total_bytes);
+                },
+                folder_id);
             if (!outcome) {
                 std::lock_guard<std::mutex> guard(state->error_mutex);
                 if (state->first_error.isEmpty()) {
@@ -134,12 +147,19 @@ void BatchWorker::restoreVideos(
             const auto video_id = (*ids)[index];
             const auto weight = weights.count(video_id) != 0U
                 ? weights[video_id] : 1000;
+            const auto reported = std::make_shared<std::atomic<std::int64_t>>(0);
             const auto outcome = vault->restore_video(video_id, *target_dir,
-                [this, state, weight, total_bytes](const double fraction) {
-                    const auto added = static_cast<std::int64_t>(
-                        fraction * static_cast<double>(weight));
-                    const auto done = state->bytes_done.fetch_add(added) + added;
-                    emit progress(done, total_bytes);
+                [this, state, reported, weight, total_bytes](const double fraction) {
+                    const auto clamped = std::clamp(fraction, 0.0, 1.0);
+                    const auto target = static_cast<std::int64_t>(
+                        clamped * static_cast<double>(weight));
+                    const auto previous = reported->exchange(target);
+                    const auto delta = target - previous;
+                    if (delta <= 0) {
+                        return;
+                    }
+                    const auto done = state->bytes_done.fetch_add(delta) + delta;
+                    emit progress(std::min(done, total_bytes), total_bytes);
                 });
             if (!outcome) {
                 std::lock_guard<std::mutex> guard(state->error_mutex);

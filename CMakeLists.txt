@@ -1,6 +1,6 @@
 cmake_minimum_required(VERSION 3.20)
 
-project(MegaVideoProtect
+project(MegaVaultProtect
     VERSION 0.1.0
     DESCRIPTION "Secure desktop video vault"
     LANGUAGES CXX
@@ -23,7 +23,7 @@ if(MSVC)
 endif()
 
 if(WIN32 AND NOT CMAKE_SIZEOF_VOID_P EQUAL 8)
-    message(FATAL_ERROR "Mega Video Protect supports only x64 Windows builds.")
+    message(FATAL_ERROR "Mega Vault Protect supports only x64 Windows builds.")
 endif()
 
 # Dependency discovery is platform-specific:

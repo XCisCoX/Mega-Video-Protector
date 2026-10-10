@@ -15,7 +15,7 @@ public:
         const auto suffix = std::to_wstring(
             std::chrono::steady_clock::now().time_since_epoch().count());
         path_ = std::filesystem::temp_directory_path()
-            / (L"MegaVideoProtect_Phase2_\u6d4b\u8bd5_" + suffix);
+            / (L"MegaVaultProtect_Phase2_\u6d4b\u8bd5_" + suffix);
         std::error_code ignored;
         std::filesystem::remove_all(path_, ignored);
     }

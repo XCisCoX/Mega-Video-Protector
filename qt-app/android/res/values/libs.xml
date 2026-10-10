@@ -21,6 +21,6 @@
     </array>
 
     <array name="load_local_libs">
-        <item>arm64-v8a;libMegaVideoProtect_arm64-v8a.so:libplugins_platforms_qtforandroid_arm64-v8a.so:libplugins_audio_qtaudio_opensles_arm64-v8a.so:libplugins_mediaservice_qtmedia_android_arm64-v8a.so:libplugins_playlistformats_qtmultimedia_m3u_arm64-v8a.so:libplugins_styles_qandroidstyle_arm64-v8a.so:libplugins_video_videonode_qtsgvideonode_android_arm64-v8a.so:libplugins_imageformats_qico_arm64-v8a.so:libplugins_imageformats_qjpeg_arm64-v8a.so:libplugins_imageformats_qgif_arm64-v8a.so</item>
+        <item>arm64-v8a;libMegaVaultProtect_arm64-v8a.so:libplugins_platforms_qtforandroid_arm64-v8a.so:libplugins_audio_qtaudio_opensles_arm64-v8a.so:libplugins_mediaservice_qtmedia_android_arm64-v8a.so:libplugins_playlistformats_qtmultimedia_m3u_arm64-v8a.so:libplugins_styles_qandroidstyle_arm64-v8a.so:libplugins_video_videonode_qtsgvideonode_android_arm64-v8a.so:libplugins_imageformats_qico_arm64-v8a.so:libplugins_imageformats_qjpeg_arm64-v8a.so:libplugins_imageformats_qgif_arm64-v8a.so</item>
     </array>
 </resources>

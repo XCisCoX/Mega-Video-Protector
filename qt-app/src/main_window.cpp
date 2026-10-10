@@ -1,6 +1,7 @@
 #include "videovault/app/batch_worker.hpp"
 #include "videovault/app/glass.hpp"
 #include "videovault/app/main_window.hpp"
+#include "videovault/app/music_window.hpp"
 #include "videovault/app/player_window.hpp"
 #include "videovault/app/settings_dialog.hpp"
 #include "videovault/app/share_server.hpp"
@@ -12,6 +13,10 @@
 #include <QAbstractButton>
 #include <QButtonGroup>
 #include <QApplication>
+#include <QGuiApplication>
+#include <QScreen>
+#include <QDragEnterEvent>
+#include <QDragMoveEvent>
 #include <QComboBox>
 #include <QDialog>
 #include <QDialogButtonBox>
@@ -21,6 +26,8 @@
 #include <QDropEvent>
 #include <QEvent>
 #include <QFileDialog>
+#include <QFileInfo>
+#include <QRegularExpression>
 #include <QFormLayout>
 #include <QFont>
 #include <QFontMetrics>
@@ -29,6 +36,7 @@
 #include <QHBoxLayout>
 #include <QHeaderView>
 #include <QIcon>
+#include <QInputDialog>
 #include <QKeyEvent>
 #include <QItemSelectionModel>
 #include <QLabel>
@@ -39,6 +47,7 @@
 #include <QMenu>
 #include <QMimeData>
 #include <QPainter>
+#include <QLinearGradient>
 #include <QPen>
 #include <QPixmap>
 #include <QResizeEvent>
@@ -79,7 +88,15 @@ namespace {
 constexpr int kSetupPage = 0;
 constexpr int kLoginPage = 1;
 constexpr int kUnlockedPage = 2;
-constexpr int kAutoLockMilliseconds = 5 * 60 * 1000;
+// 0 means the vault stays unlocked until Lock is pressed. Five minutes is the
+// default, matching the previous fixed timer.
+int autoLockMilliseconds() {
+    const int minutes = QSettings().value(QStringLiteral("security/autoLockMinutes"), 5).toInt();
+    if (minutes <= 0) {
+        return 0;
+    }
+    return minutes * 60 * 1000;
+}
 
 std::filesystem::path pathFromText(const QString& text) {
     return std::filesystem::path(text.trimmed().toStdWString());
@@ -87,6 +104,42 @@ std::filesystem::path pathFromText(const QString& text) {
 
 QString textFromPath(const std::filesystem::path& path) {
     return QString::fromStdWString(path.wstring());
+}
+
+QPair<QString, QString> songLabel(const QString& fileName) {
+    const QFileInfo info(fileName);
+    QString base = info.completeBaseName().trimmed();
+    if (base.isEmpty()) {
+        base = fileName.trimmed();
+    }
+    const QString original = base;
+    const QRegularExpression leading(QStringLiteral("^\\s*(?:\\d{1,3}\\s*[.\\-_]\\s+)+"));
+    base.remove(leading);
+    base = base.trimmed();
+    if (base.isEmpty()) {
+        base = original;
+    }
+    const QStringList separators{
+        QStringLiteral(" — "), QStringLiteral(" – "), QStringLiteral(" - ")};
+    for (const QString& separator : separators) {
+        const int at = base.indexOf(separator);
+        if (at > 0 && at + separator.size() < base.size()) {
+            return {base.left(at).trimmed(), base.mid(at + separator.size()).trimmed()};
+        }
+    }
+    return {{}, base};
+}
+
+bool isAudioFileName(const QString& name) {
+    const QString suffix = QFileInfo(name).suffix().toLower();
+    static const QStringList kAudio = {
+        QStringLiteral("mp3"), QStringLiteral("flac"), QStringLiteral("wav"),
+        QStringLiteral("wave"), QStringLiteral("ogg"), QStringLiteral("oga"),
+        QStringLiteral("opus"), QStringLiteral("m4a"), QStringLiteral("aac"),
+        QStringLiteral("wma"), QStringLiteral("aiff"), QStringLiteral("aif"),
+        QStringLiteral("alac"), QStringLiteral("mp2"), QStringLiteral("mka"),
+    };
+    return kAudio.contains(suffix);
 }
 
 void clearSecret(std::string& secret) noexcept {
@@ -126,6 +179,58 @@ QListWidgetItem* findListItemById(QListWidget* list, const std::int64_t video_id
         }
     }
     return nullptr;
+}
+
+const QPixmap& folderPixmap() {
+    static const QPixmap pix = [] {
+        QPixmap image(128, 128);
+        image.fill(Qt::transparent);
+        QPainter painter(&image);
+        painter.setRenderHint(QPainter::Antialiasing);
+        painter.setPen(Qt::NoPen);
+        painter.setBrush(QColor(64, 140, 230));
+        painter.drawRoundedRect(8, 36, 112, 76, 12, 12);
+        painter.setBrush(QColor(140, 196, 255));
+        painter.drawRoundedRect(8, 16, 56, 30, 8, 8);
+        return image;
+    }();
+    return pix;
+}
+
+void updateIconItemText(QListWidgetItem* item);
+
+QString vaultErrorText(const core::VaultError& error) {
+    if (!error.technical_detail.empty()) {
+        return QString::fromStdString(error.technical_detail);
+    }
+    return QString::fromUtf8(core::user_message(error.code).data());
+}
+
+void addLibraryEntry(
+    QListWidget* list,
+    QTreeWidget* tree,
+    const qlonglong role_id,
+    const int kind,
+    const QString& name,
+    const QString& meta) {
+    auto* iconItem = new QListWidgetItem(list);
+    iconItem->setData(Qt::UserRole, role_id);
+    iconItem->setData(Qt::UserRole + 1, name);
+    iconItem->setData(Qt::UserRole + 3, name);
+    iconItem->setData(Qt::UserRole + 5, meta);
+    iconItem->setData(Qt::UserRole + 12, kind);
+    iconItem->setData(Qt::UserRole + 4, folderPixmap());
+    iconItem->setIcon(QIcon(folderPixmap()));
+    iconItem->setToolTip(name);
+    updateIconItemText(iconItem);
+
+    auto* treeItem = new QTreeWidgetItem(tree);
+    treeItem->setText(0, name);
+    treeItem->setText(1, meta);
+    treeItem->setIcon(0, QIcon(folderPixmap()));
+    treeItem->setData(0, Qt::UserRole, role_id);
+    treeItem->setData(0, Qt::UserRole + 12, kind);
+    treeItem->setToolTip(0, name);
 }
 
 // Icon/list cards show the video name plus, in large-icon (IconMode) view, the
@@ -242,6 +347,46 @@ public:
             painter->setPen(QPen(QColor(51, 144, 236), 3));
             painter->setBrush(Qt::NoBrush);
             painter->drawRect(tile.adjusted(1, 1, -2, -2));
+        }
+        const QString fileName = index.data(Qt::UserRole + 1).toString();
+        if (isAudioFileName(fileName)) {
+            QString artist = index.data(Qt::UserRole + 13).toString();
+            QString title = index.data(Qt::UserRole + 14).toString();
+            if (title.isEmpty()) {
+                const auto parsed = songLabel(fileName);
+                artist = parsed.first;
+                title = parsed.second;
+            }
+            const QRect shade(tile.left(), tile.bottom() - 46, tile.width(), 46);
+            QLinearGradient fade(shade.topLeft(), shade.bottomLeft());
+            fade.setColorAt(0.0, QColor(0, 0, 0, 0));
+            fade.setColorAt(1.0, QColor(0, 0, 0, 190));
+            painter->fillRect(shade, fade);
+            const QRect text = tile.adjusted(6, 0, -6, -5);
+            QFont titleFont(QStringLiteral("Segoe UI"));
+            titleFont.setPixelSize(12);
+            titleFont.setWeight(QFont::DemiBold);
+            painter->setFont(titleFont);
+            const QFontMetrics titleMetrics(titleFont);
+            painter->setPen(Qt::white);
+            painter->drawText(
+                QRect(text.left(), text.bottom() - (artist.isEmpty() ? titleMetrics.height() : titleMetrics.height() + 14),
+                    text.width(), titleMetrics.height()),
+                Qt::AlignLeft | Qt::AlignVCenter,
+                titleMetrics.elidedText(title, Qt::ElideRight, text.width()));
+            if (!artist.isEmpty()) {
+                QFont artistFont(QStringLiteral("Segoe UI"));
+                artistFont.setPixelSize(11);
+                painter->setFont(artistFont);
+                painter->setPen(QColor(220, 220, 224));
+                const QFontMetrics artistMetrics(artistFont);
+                painter->drawText(
+                    QRect(text.left(), text.bottom() - artistMetrics.height(), text.width(), artistMetrics.height()),
+                    Qt::AlignLeft | Qt::AlignVCenter,
+                    artistMetrics.elidedText(artist, Qt::ElideRight, text.width()));
+            }
+            painter->restore();
+            return;
         }
         const QString duration = index.data(Qt::UserRole + 3).toString();
         if (!duration.isEmpty()) {
@@ -394,6 +539,77 @@ core::Argon2Parameters selectedParameters(const int profile) {
     return parameters;
 }
 
+// Right-click sheet. Same dark rounded card as Settings, not the system menu.
+class CommandPopup final : public QDialog {
+public:
+    explicit CommandPopup(QWidget* parent)
+        : QDialog(parent, Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint) {
+        setAttribute(Qt::WA_TranslucentBackground);
+        setObjectName(QStringLiteral("commandPopup"));
+        auto* layout = new QVBoxLayout(this);
+        layout->setContentsMargins(8, 8, 8, 8);
+        layout->setSpacing(2);
+        setAutoFillBackground(false);
+        setStyleSheet(QStringLiteral(
+            "QDialog#commandPopup { background: transparent; border: none; }"
+            "QPushButton#menuCommand, QPushButton#menuDanger {"
+            "  color: white; background: transparent; border: none; border-radius: 10px;"
+            "  text-align: left; padding: 0 16px; min-height: 36px; font-size: 10pt; }"
+            "QPushButton#menuCommand:hover { background: rgba(51, 144, 236, 90); }"
+            "QPushButton#menuDanger { color: #ff453a; }"
+            "QPushButton#menuDanger:hover { background: rgba(255, 69, 58, 42); }"));
+    }
+
+    QPushButton* addCommand(const QString& text, const int result, const bool danger = false) {
+        auto* layout = static_cast<QVBoxLayout*>(this->layout());
+        if (danger && layout->count() > 0) {
+            auto* line = new QWidget(this);
+            line->setFixedHeight(1);
+            line->setAttribute(Qt::WA_StyledBackground, true);
+            line->setStyleSheet(QStringLiteral(
+                "background: rgba(255, 255, 255, 28); margin: 4px 8px;"));
+            layout->addSpacing(4);
+            layout->addWidget(line);
+            layout->addSpacing(4);
+        }
+        auto* button = new QPushButton(text, this);
+        button->setObjectName(danger
+            ? QStringLiteral("menuDanger")
+            : QStringLiteral("menuCommand"));
+        button->setCursor(Qt::PointingHandCursor);
+        button->setFocusPolicy(Qt::NoFocus);
+        button->setAutoDefault(false);
+        button->setDefault(false);
+        layout->addWidget(button);
+        connect(button, &QPushButton::clicked, this, [this, result] { done(result); });
+        return button;
+    }
+
+protected:
+    void paintEvent(QPaintEvent*) override {
+        QPainter painter(this);
+        painter.setRenderHint(QPainter::Antialiasing, true);
+        painter.setPen(QPen(QColor(255, 255, 255, 36)));
+        painter.setBrush(QColor(28, 28, 30));
+        painter.drawRoundedRect(rect().adjusted(1, 1, -2, -2), 14, 14);
+    }
+};
+
+void placePopup(QDialog* popup, const QPoint& globalPosition) {
+    popup->adjustSize();
+    QPoint position = globalPosition;
+    if (QScreen* screen = QGuiApplication::screenAt(globalPosition)) {
+        const QRect area = screen->availableGeometry();
+        if (position.x() + popup->width() > area.right()) {
+            position.setX(std::max(area.left(), area.right() - popup->width() - 4));
+        }
+        if (position.y() + popup->height() > area.bottom()) {
+            position.setY(std::max(area.top(), area.bottom() - popup->height() - 4));
+        }
+    }
+    popup->move(position);
+}
+
 } // namespace
 
 struct VaultOperationResult {
@@ -404,7 +620,7 @@ struct VaultOperationResult {
 
 MainWindow::MainWindow(QWidget* parent)
     : QMainWindow(parent), autoLockTimer_(new QTimer(this)) {
-    setWindowTitle(QStringLiteral("Mega Video Protect"));
+    setWindowTitle(QStringLiteral("Mega Vault Protect"));
 #ifdef Q_OS_WIN
     setWindowFlags(Qt::Window | Qt::FramelessWindowHint
         | Qt::WindowSystemMenuHint | Qt::WindowMinimizeButtonHint
@@ -415,7 +631,6 @@ MainWindow::MainWindow(QWidget* parent)
     setAcceptDrops(true); // drag & drop video import
 
     autoLockTimer_->setSingleShot(true);
-    autoLockTimer_->setInterval(kAutoLockMilliseconds);
     connect(autoLockTimer_, &QTimer::timeout, this, [this] {
         // Never auto-lock in the middle of an import/restore/remove batch:
         // lock() blocks on the vault mutex a worker currently holds and the
@@ -474,6 +689,9 @@ MainWindow::~MainWindow() {
     if (playerWindow_ != nullptr) {
         playerWindow_->close();
     }
+    if (musicWindow_ != nullptr) {
+        musicWindow_->close();
+    }
     // Stop the batch worker before the vault goes away: quit the event loop,
     // then wait for the current batch item to finish (bounded).
     if (batchThread_ != nullptr) {
@@ -482,9 +700,6 @@ MainWindow::~MainWindow() {
     }
     if (adminWatcher_ != nullptr) {
         adminWatcher_->waitForFinished();
-    }
-    if (thumbnailWatcher_ != nullptr) {
-        thumbnailWatcher_->waitForFinished();
     }
     if (tagEditorWatcher_ != nullptr) {
         tagEditorWatcher_->waitForFinished();
@@ -495,6 +710,9 @@ MainWindow::~MainWindow() {
 }
 
 bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
+    if (handleExplorerDrag(watched, event)) {
+        return true;
+    }
     if (galleryStack_ != nullptr && watched == galleryStack_->parentWidget()
         && event->type() == QEvent::Resize) {
         layoutLibraryChrome();
@@ -518,9 +736,128 @@ bool MainWindow::eventFilter(QObject* watched, QEvent* event) {
                 }
             }
             if (inGallery) {
+                const int kind = selectedGalleryKind();
+                if (kind == 1 || kind == 2) {
+                    activateCurrentItem();
+                    return true;
+                }
                 const std::int64_t videoId = selectedVideoId();
                 if (videoId >= 0) {
                     beginPlayback(videoId);
+                    return true;
+                }
+            }
+        }
+        if (galleryHasFocus()
+            && key->key() == Qt::Key_F2 && key->modifiers() == Qt::NoModifier) {
+            const int kind = selectedGalleryKind();
+            if (kind == 1) {
+                const qlonglong role = galleryStack_->currentWidget() == detailsTree_
+                    ? detailsTree_->currentItem()->data(0, Qt::UserRole).toLongLong()
+                    : iconList_->currentItem()->data(Qt::UserRole).toLongLong();
+                beginRenameFolder(-role);
+                return true;
+            }
+            const std::int64_t videoId = selectedVideoId();
+            if (videoId > 0) {
+                beginRenameVideo(videoId);
+                return true;
+            }
+        }
+        if (galleryHasFocus()
+            && key->key() == Qt::Key_Delete && key->modifiers() == Qt::NoModifier) {
+            std::vector<std::int64_t> folder_ids;
+            const auto take = [&folder_ids](const int kind, const qlonglong role) {
+                if (kind == 1 && role < 0) {
+                    folder_ids.push_back(-role);
+                }
+            };
+            if (galleryStack_->currentWidget() == detailsTree_) {
+                for (auto* item : detailsTree_->selectedItems()) {
+                    take(item->data(0, Qt::UserRole + 12).toInt(),
+                        item->data(0, Qt::UserRole).toLongLong());
+                }
+            } else {
+                for (auto* item : iconList_->selectedItems()) {
+                    take(item->data(Qt::UserRole + 12).toInt(),
+                        item->data(Qt::UserRole).toLongLong());
+                }
+            }
+            const auto videos = selectedVideoIds();
+            if (!folder_ids.empty() && videos.empty() && folder_ids.size() == 1U) {
+                beginRemoveFolder(folder_ids.front());
+                return true;
+            }
+            if (!folder_ids.empty()) {
+                const auto confirm = QMessageBox::question(
+                    this, QStringLiteral("Remove"),
+                    videos.empty()
+                        ? QStringLiteral("Remove %1 folder(s)? Videos inside move up and stay in the vault.")
+                            .arg(folder_ids.size())
+                        : QStringLiteral("Remove the selected folders and delete the selected videos?"),
+                    QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+                if (confirm != QMessageBox::Yes) {
+                    return true;
+                }
+                for (const auto folder_id : folder_ids) {
+                    auto removed = vault_->remove_folder(folder_id);
+                    if (!removed) {
+                        setError(galleryStatus_, vaultErrorText(removed.error()));
+                        galleryStatus_->setVisible(true);
+                        refreshGallery();
+                        return true;
+                    }
+                }
+                if (currentFolderId_ != 0) {
+                    bool still = false;
+                    for (const auto& folder : folders_) {
+                        if (folder.id == currentFolderId_) {
+                            still = true;
+                        }
+                    }
+                    for (const auto folder_id : folder_ids) {
+                        if (folder_id == currentFolderId_) {
+                            still = false;
+                        }
+                    }
+                    if (!still) {
+                        currentFolderId_ = 0;
+                    }
+                }
+            }
+            if (folder_ids.empty() && videos.empty()) {
+                return false;
+            }
+            if (!videos.empty()) {
+                beginRemoveSelected(folder_ids.empty());
+            } else {
+                refreshGallery();
+            }
+            return true;
+        }
+        if (galleryHasFocus()
+            && key->key() == Qt::Key_N
+            && key->modifiers() == (Qt::ControlModifier | Qt::ShiftModifier)) {
+            beginNewFolder();
+            return true;
+        }
+        if (key->key() == Qt::Key_Backspace && key->modifiers() == Qt::NoModifier) {
+            QWidget* focus = QApplication::focusWidget();
+            for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+                if (qobject_cast<QLineEdit*>(widget) != nullptr) {
+                    break;
+                }
+                if (widget == detailsTree_ || widget == iconList_) {
+                    if (currentFolderId_ != 0) {
+                        std::int64_t parent = 0;
+                        for (const auto& folder : folders_) {
+                            if (folder.id == currentFolderId_) {
+                                parent = folder.parent_id;
+                                break;
+                            }
+                        }
+                        openFolder(parent);
+                    }
                     return true;
                 }
             }
@@ -651,7 +988,7 @@ void MainWindow::buildInterface() {
     auto* captionLayout = new QHBoxLayout(captionBar_);
     captionLayout->setContentsMargins(14, 0, 0, 0);
     captionLayout->setSpacing(0);
-    auto* captionTitle = new QLabel(QStringLiteral("Mega Video Protect"), captionBar_);
+    auto* captionTitle = new QLabel(QStringLiteral("Mega Vault Protect"), captionBar_);
     captionTitle->setAttribute(Qt::WA_TransparentForMouseEvents, true);
     QFont captionFont(QStringLiteral("Segoe UI"));
     captionFont.setPointSize(9);
@@ -748,7 +1085,7 @@ QWidget* MainWindow::buildLoginPage() {
     auto* layout = new QVBoxLayout(card);
     layout->setContentsMargins(42, 38, 42, 40);
     layout->setSpacing(14);
-    layout->addWidget(heading(QStringLiteral("Unlock Mega Video Protect"), card));
+    layout->addWidget(heading(QStringLiteral("Unlock Mega Vault Protect"), card));
     layout->addWidget(description(
         QStringLiteral("Enter the vault password to unlock the encrypted database."), card));
 
@@ -818,10 +1155,13 @@ QWidget* MainWindow::buildUnlockedPage() {
     searchEdit_->setMinimumWidth(220);
     importButton_ = new QPushButton(QStringLiteral("Import"), toolbar);
     importButton_->setProperty("primary", true);
-    importButton_->setToolTip(QStringLiteral("Import a video or picture"));
+    importButton_->setToolTip(QStringLiteral("Import a video, picture, or song"));
     importFolderButton_ = new QPushButton(QStringLiteral("Folder"), toolbar);
     importFolderButton_->setToolTip(QStringLiteral(
         "Import every video file from a folder (and drop files here to import)"));
+    newFolderButton_ = new QPushButton(QStringLiteral("New folder"), toolbar);
+    newFolderButton_->setToolTip(QStringLiteral(
+        "Create a folder here. Folders are names in the vault — the encrypted files stay put."));
     shareButton_ = new QPushButton(QStringLiteral("Share"), toolbar);
     shareButton_->setToolTip(QStringLiteral(
         "Share this vault on Wi-Fi over an encrypted connection. The phone must enter the vault password. "
@@ -844,6 +1184,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     titleRow->addStretch(1);
     titleRow->addWidget(importButton_);
     titleRow->addWidget(importFolderButton_);
+    titleRow->addWidget(newFolderButton_);
     titleRow->addWidget(shareButton_);
     titleRow->addWidget(settingsButton_);
     titleRow->addWidget(lockButton);
@@ -885,6 +1226,14 @@ QWidget* MainWindow::buildUnlockedPage() {
     filterRow->addWidget(tagFilterCombo_);
     toolbarLayout->addLayout(filterRow);
 
+    crumbHost_ = new QWidget(toolbar);
+    crumbHost_->setStyleSheet(QStringLiteral("background: transparent;"));
+    crumbLayout_ = new QHBoxLayout(crumbHost_);
+    crumbLayout_->setContentsMargins(0, 0, 0, 0);
+    crumbLayout_->setSpacing(2);
+    toolbarLayout->addWidget(crumbHost_);
+    rebuildBreadcrumb();
+
     // Explorer-style gallery views fill the window.
     detailsTree_ = new QTreeWidget(page);
     detailsTree_->setObjectName(QStringLiteral("gallery"));
@@ -897,7 +1246,13 @@ QWidget* MainWindow::buildUnlockedPage() {
     detailsTree_->setAlternatingRowColors(true);
     detailsTree_->setUniformRowHeights(true);
     detailsTree_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    detailsTree_->setAcceptDrops(false);
+    detailsTree_->setAcceptDrops(true);
+    detailsTree_->viewport()->setAcceptDrops(true);
+    detailsTree_->setDragEnabled(true);
+    detailsTree_->setDragDropMode(QAbstractItemView::DragDrop);
+    detailsTree_->setDefaultDropAction(Qt::TargetMoveAction);
+    detailsTree_->viewport()->installEventFilter(this);
+    detailsTree_->installEventFilter(this);
     detailsTree_->header()->setStretchLastSection(true);
     detailsTree_->setSortingEnabled(true);
     iconList_ = new IconGrid(page);
@@ -910,7 +1265,13 @@ QWidget* MainWindow::buildUnlockedPage() {
     iconList_->setMovement(QListView::Static);
     iconList_->setVerticalScrollMode(QAbstractItemView::ScrollPerPixel);
     iconList_->setSelectionMode(QAbstractItemView::ExtendedSelection);
-    iconList_->setAcceptDrops(false);
+    iconList_->setAcceptDrops(true);
+    iconList_->viewport()->setAcceptDrops(true);
+    iconList_->setDragEnabled(true);
+    iconList_->setDragDropMode(QAbstractItemView::DragDrop);
+    iconList_->setDefaultDropAction(Qt::TargetMoveAction);
+    iconList_->viewport()->installEventFilter(this);
+    iconList_->installEventFilter(this);
 
     galleryStack_ = new QStackedWidget(page);
     galleryStack_->addWidget(detailsTree_);
@@ -941,6 +1302,7 @@ QWidget* MainWindow::buildUnlockedPage() {
     connect(lockButton, &QPushButton::clicked, this, [this] { lockVault(); });
     connect(importButton_, &QPushButton::clicked, this, [this] { beginImport(); });
     connect(importFolderButton_, &QPushButton::clicked, this, [this] { beginImportFolder(); });
+    connect(newFolderButton_, &QPushButton::clicked, this, [this] { beginNewFolder(); });
     connect(shareButton_, &QPushButton::clicked, this, [this] { openShare(); });
     connect(settingsButton_, &QPushButton::clicked, this, [this] { openSettings(); });
     connect(viewModeCombo_, qOverload<int>(&QComboBox::currentIndexChanged),
@@ -953,6 +1315,8 @@ QWidget* MainWindow::buildUnlockedPage() {
         });
     connect(sortButton_, &QPushButton::clicked, this, [this] {
         QMenu menu(this);
+        menu.setWindowFlags(Qt::Popup | Qt::FramelessWindowHint | Qt::NoDropShadowWindowHint);
+        menu.setAttribute(Qt::WA_TranslucentBackground);
         const QStringList labels{
             QStringLiteral("Name"), QStringLiteral("Size"), QStringLiteral("Duration"),
             QStringLiteral("Resolution"), QStringLiteral("Codec"), QStringLiteral("Tags"),
@@ -982,11 +1346,27 @@ QWidget* MainWindow::buildUnlockedPage() {
     });
     connect(detailsTree_, &QTreeWidget::itemDoubleClicked,
         this, [this](QTreeWidgetItem* item, int) {
-            beginPlayback(item->data(0, Qt::UserRole).toLongLong());
+            const int kind = item->data(0, Qt::UserRole + 12).toInt();
+            const auto id = item->data(0, Qt::UserRole).toLongLong();
+            if (kind == 1) {
+                openFolder(-id);
+            } else if (kind == 2) {
+                openFolder(id);
+            } else {
+                beginPlayback(id);
+            }
         });
     connect(iconList_, &QListWidget::itemDoubleClicked,
         this, [this](QListWidgetItem* item) {
-            beginPlayback(item->data(Qt::UserRole).toLongLong());
+            const int kind = item->data(Qt::UserRole + 12).toInt();
+            const auto id = item->data(Qt::UserRole).toLongLong();
+            if (kind == 1) {
+                openFolder(-id);
+            } else if (kind == 2) {
+                openFolder(id);
+            } else {
+                beginPlayback(id);
+            }
         });
     detailsTree_->setContextMenuPolicy(Qt::CustomContextMenu);
     iconList_->setContextMenuPolicy(Qt::CustomContextMenu);
@@ -1136,6 +1516,18 @@ void MainWindow::sortGalleryItems() {
     const int key = sortKey_;
     const bool ascending = sortAscending_;
     std::stable_sort(items.begin(), items.end(), [key, ascending](QListWidgetItem* left, QListWidgetItem* right) {
+        auto rank = [](QListWidgetItem* item) {
+            const int kind = item->data(Qt::UserRole + 12).toInt();
+            if (kind == 2) {
+                return 0;
+            }
+            return kind == 1 ? 1 : 2;
+        };
+        const int leftRank = rank(left);
+        const int rightRank = rank(right);
+        if (leftRank != rightRank) {
+            return leftRank < rightRank;
+        }
         auto textCompare = [](const QString& a, const QString& b) {
             return a.compare(b, Qt::CaseInsensitive);
         };
@@ -1437,58 +1829,121 @@ void MainWindow::finishEditTags() {
 }
 
 void MainWindow::showGalleryContextMenu(const QPoint& global_position) {
-    std::int64_t video_id = -1;
+    qlonglong role = -1;
+    int kind = 0;
+    bool on_item = false;
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->itemAt(
             detailsTree_->viewport()->mapFromGlobal(global_position));
         if (item != nullptr) {
-            video_id = item->data(0, Qt::UserRole).toLongLong();
+            on_item = true;
+            role = item->data(0, Qt::UserRole).toLongLong();
+            kind = item->data(0, Qt::UserRole + 12).toInt();
+            if (!item->isSelected()) {
+                detailsTree_->clearSelection();
+                item->setSelected(true);
+                detailsTree_->setCurrentItem(item);
+            }
         }
     } else {
         auto* item = iconList_->itemAt(
             iconList_->viewport()->mapFromGlobal(global_position));
         if (item != nullptr) {
-            video_id = item->data(Qt::UserRole).toLongLong();
+            on_item = true;
+            role = item->data(Qt::UserRole).toLongLong();
+            kind = item->data(Qt::UserRole + 12).toInt();
+            if (!item->isSelected()) {
+                iconList_->clearSelection();
+                item->setSelected(true);
+                iconList_->setCurrentItem(item);
+            }
         }
     }
-    if (video_id < 0) {
+
+    CommandPopup menu(this);
+    if (!on_item || kind == 2) {
+        menu.addCommand(QStringLiteral("New folder"), 1);
+        placePopup(&menu, global_position);
+        if (menu.exec() == 1) {
+            beginNewFolder();
+        }
         return;
     }
-    QMenu menu(this);
-    QAction* play = menu.addAction(QStringLiteral("Play"));
-    QAction* editTags = menu.addAction(QStringLiteral("Edit tags…"));
-    QAction* restore = menu.addAction(QStringLiteral("Restore to folder…"));
-    QAction* regenerate = menu.addAction(QStringLiteral("Regenerate thumbnail"));
-    QAction* remove = menu.addAction(QStringLiteral("Remove"));
-    QAction* chosen = menu.exec(global_position);
-    if (chosen == play) {
+    if (kind == 1) {
+        const qlonglong folder_id = -role;
+        menu.addCommand(QStringLiteral("Open"), 1);
+        menu.addCommand(QStringLiteral("Rename"), 2);
+        menu.addCommand(QStringLiteral("Move to…"), 3);
+        menu.addCommand(QStringLiteral("Remove folder"), 4, true);
+        placePopup(&menu, global_position);
+        switch (menu.exec()) {
+        case 1:
+            openFolder(folder_id);
+            break;
+        case 2:
+            beginRenameFolder(folder_id);
+            break;
+        case 3:
+            beginMoveSelection(folder_id);
+            break;
+        case 4:
+            beginRemoveFolder(folder_id);
+            break;
+        default:
+            break;
+        }
+        return;
+    }
+
+    const std::int64_t video_id = role;
+    const int count = std::max(1, static_cast<int>(selectedVideoIds().size()));
+    const QString countText = count > 1
+        ? QStringLiteral(" %1 items").arg(count)
+        : QString();
+
+    menu.addCommand(QStringLiteral("Play"), 1);
+    menu.addCommand(count > 1
+        ? QStringLiteral("Edit tags")
+        : QStringLiteral("Edit tags…"), 2);
+    if (count == 1) {
+        menu.addCommand(QStringLiteral("Rename"), 3);
+    }
+    menu.addCommand(count > 1
+        ? QStringLiteral("Move") + countText + QStringLiteral("…")
+        : QStringLiteral("Move to…"), 4);
+    menu.addCommand(count > 1
+        ? QStringLiteral("Restore") + countText
+        : QStringLiteral("Restore to folder…"), 5);
+    menu.addCommand(count > 1
+        ? QStringLiteral("Remove") + countText
+        : QStringLiteral("Remove"), 6, true);
+    placePopup(&menu, global_position);
+    switch (menu.exec()) {
+    case 1:
         beginPlayback(video_id);
-    } else if (chosen == editTags) {
-        // Apply to the whole selection when multiple items are selected;
-        // fall back to the clicked video when nothing is selected.
+        break;
+    case 2: {
         auto ids = selectedVideoIds();
         if (ids.empty()) {
             ids.push_back(video_id);
         }
         beginEditTags(ids);
-    } else if (chosen == restore) {
-        // Restore the clicked video; if the selection holds multiple items,
-        // restore all of them.
-        const auto selected = selectedVideoIds();
-        if (selected.empty()) {
-            QItemSelectionModel* model = galleryStack_->currentWidget() == detailsTree_
-                ? detailsTree_->selectionModel()
-                : iconList_->selectionModel();
-            if (model != nullptr) {
-                model->clearSelection();
-            }
-        }
+        break;
+    }
+    case 3:
+        beginRenameVideo(video_id);
+        break;
+    case 4:
+        beginMoveSelection(0);
+        break;
+    case 5:
         beginRestoreSelected();
-    } else if (chosen == regenerate) {
-        // Operate on the whole selection (multi-select supported).
-        beginGenerateThumbnail();
-    } else if (chosen == remove) {
+        break;
+    case 6:
         beginRemoveSelected();
+        break;
+    default:
+        break;
     }
 }
 
@@ -1610,6 +2065,7 @@ void MainWindow::beginImport() {
     const QStringList selected = QFileDialog::getOpenFileNames(
         this, QStringLiteral("Import media"), {},
         QStringLiteral("Media files (*.mp4 *.mkv *.avi *.mov *.wmv *.webm *.m4v *.ts *.flv *.3gp *.mpg *.mpeg"
+                       " *.mp3 *.flac *.wav *.ogg *.opus *.m4a *.aac *.wma *.aiff"
                        " *.jpg *.jpeg *.png *.webp *.bmp *.gif);;All files (*)"));
     if (selected.isEmpty()) {
         return;
@@ -1619,7 +2075,7 @@ void MainWindow::beginImport() {
     for (const auto& entry : selected) {
         sources.push_back(pathFromText(entry));
     }
-    beginImportMany(std::move(sources));
+    beginImportMany(std::move(sources), currentFolderId_);
 }
 
 void MainWindow::beginImportFolder() {
@@ -1637,9 +2093,11 @@ void MainWindow::beginImportFolder() {
     const QStringList names = directory.entryList(
         {"*.mp4", "*.mkv", "*.avi", "*.mov", "*.wmv", "*.webm", "*.m4v",
          "*.ts", "*.flv", "*.3gp", "*.mpg", "*.mpeg",
+         "*.mp3", "*.flac", "*.wav", "*.ogg", "*.opus", "*.m4a", "*.aac", "*.wma", "*.aiff",
          "*.jpg", "*.jpeg", "*.png", "*.webp", "*.bmp", "*.gif",
          "*.MP4", "*.MKV", "*.AVI", "*.MOV", "*.WMV", "*.WEBM", "*.M4V",
          "*.TS", "*.FLV", "*.3GP", "*.MPG", "*.MPEG",
+         "*.MP3", "*.FLAC", "*.WAV", "*.OGG", "*.OPUS", "*.M4A", "*.AAC", "*.WMA", "*.AIFF",
          "*.JPG", "*.JPEG", "*.PNG", "*.WEBP", "*.BMP", "*.GIF"},
         QDir::Files | QDir::Readable, QDir::Name);
     if (names.isEmpty()) {
@@ -1652,10 +2110,11 @@ void MainWindow::beginImportFolder() {
     for (const auto& name : names) {
         sources.push_back(pathFromText(directory.filePath(name)));
     }
-    beginImportMany(std::move(sources));
+    beginImportMany(std::move(sources), currentFolderId_);
 }
 
-void MainWindow::beginImportMany(std::vector<std::filesystem::path> sources) {
+void MainWindow::beginImportMany(
+    std::vector<std::filesystem::path> sources, const std::int64_t folder_id) {
     if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
@@ -1675,9 +2134,10 @@ void MainWindow::beginImportMany(std::vector<std::filesystem::path> sources) {
     progressBar_->show();
     // Run on the batch worker thread; progress/completion arrive as queued
     // signals so the UI stays fully responsive during the import.
+    const auto folderId = folder_id;
     QMetaObject::invokeMethod(batchWorker_,
-        [worker = batchWorker_, vault, sources = std::move(shared_sources)] {
-            worker->importFiles(sources, vault);
+        [worker = batchWorker_, vault, sources = std::move(shared_sources), folderId] {
+            worker->importFiles(sources, vault, folderId);
         },
         Qt::QueuedConnection);
 }
@@ -1708,6 +2168,7 @@ void MainWindow::openSettings() {
     connect(dialog, &SettingsDialog::settingsChanged, this, [this] {
         refreshTagFilter();
         refreshGallery();
+        resetAutoLock();
     });
     dialog->setAttribute(Qt::WA_DeleteOnClose);
     dialog->show();
@@ -1766,12 +2227,249 @@ std::vector<std::int64_t> MainWindow::selectedVideoIds() const {
     ids.reserve(static_cast<std::size_t>(
         tree_selection.size() + list_selection.size()));
     for (auto* item : tree_selection) {
-        ids.push_back(item->data(0, Qt::UserRole).toLongLong());
+        if (item->data(0, Qt::UserRole + 12).toInt() != 0) {
+            continue;
+        }
+        const auto id = item->data(0, Qt::UserRole).toLongLong();
+        if (id > 0) {
+            ids.push_back(id);
+        }
     }
     for (auto* item : list_selection) {
-        ids.push_back(item->data(Qt::UserRole).toLongLong());
+        if (item->data(Qt::UserRole + 12).toInt() != 0) {
+            continue;
+        }
+        const auto id = item->data(Qt::UserRole).toLongLong();
+        if (id > 0) {
+            ids.push_back(id);
+        }
     }
     return ids;
+}
+
+bool MainWindow::galleryHasFocus() const {
+    QWidget* focus = QApplication::focusWidget();
+    for (QWidget* widget = focus; widget != nullptr; widget = widget->parentWidget()) {
+        if (qobject_cast<QLineEdit*>(widget) != nullptr
+            || qobject_cast<QComboBox*>(widget) != nullptr
+            || qobject_cast<QAbstractButton*>(widget) != nullptr) {
+            return false;
+        }
+        if (widget == detailsTree_ || widget == iconList_) {
+            return true;
+        }
+    }
+    return false;
+}
+
+void MainWindow::highlightDropFolder(const std::int64_t folder_id, const bool on) {
+    dropHighlight_ = on ? folder_id : -1;
+    const QBrush mark(QColor(51, 144, 236, 110));
+    if (detailsTree_ != nullptr) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            const int kind = item->data(0, Qt::UserRole + 12).toInt();
+            const auto role = item->data(0, Qt::UserRole).toLongLong();
+            const qlonglong id = kind == 1 ? -role : role;
+            const bool hit = on && (kind == 1 || kind == 2) && id == folder_id;
+            item->setBackground(0, hit ? mark : QBrush());
+        }
+    }
+    if (iconList_ != nullptr) {
+        for (int index = 0; index < iconList_->count(); ++index) {
+            auto* item = iconList_->item(index);
+            const int kind = item->data(Qt::UserRole + 12).toInt();
+            const auto role = item->data(Qt::UserRole).toLongLong();
+            const qlonglong id = kind == 1 ? -role : role;
+            const bool hit = on && (kind == 1 || kind == 2) && id == folder_id;
+            item->setBackground(hit ? mark : QBrush());
+        }
+    }
+    if (crumbHost_ != nullptr) {
+        const auto buttons = crumbHost_->findChildren<QPushButton*>();
+        for (auto* button : buttons) {
+            const bool hit = on && button->property("mvpDropFolder").isValid()
+                && button->property("mvpDropFolder").toLongLong() == folder_id;
+            const bool current = button->property("mvpDropFolder").toLongLong() == currentFolderId_;
+            button->setStyleSheet(hit
+                ? QStringLiteral("QPushButton { color: white; background: rgba(51, 144, 236, 150);"
+                    " border: none; border-radius: 8px; padding: 2px 6px; }")
+                : (current
+                    ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
+                    : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }")));
+        }
+    }
+}
+
+void MainWindow::moveItemsToFolder(const std::int64_t destination) {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    std::vector<std::int64_t> videos;
+    std::vector<std::int64_t> folders;
+    const auto take = [&videos, &folders](const int kind, const qlonglong role) {
+        if (kind == 0 && role > 0) {
+            videos.push_back(role);
+        } else if (kind == 1 && role < 0) {
+            folders.push_back(-role);
+        }
+    };
+    if (galleryStack_->currentWidget() == detailsTree_) {
+        for (auto* item : detailsTree_->selectedItems()) {
+            take(item->data(0, Qt::UserRole + 12).toInt(),
+                item->data(0, Qt::UserRole).toLongLong());
+        }
+    } else {
+        for (auto* item : iconList_->selectedItems()) {
+            take(item->data(Qt::UserRole + 12).toInt(),
+                item->data(Qt::UserRole).toLongLong());
+        }
+    }
+    auto contains = [this](const std::int64_t ancestor, std::int64_t node) {
+        for (int guard = 0; guard < 64 && node != 0; ++guard) {
+            if (node == ancestor) {
+                return true;
+            }
+            std::int64_t parent = 0;
+            bool found = false;
+            for (const auto& folder : folders_) {
+                if (folder.id == node) {
+                    parent = folder.parent_id;
+                    found = true;
+                    break;
+                }
+            }
+            if (!found) {
+                return false;
+            }
+            node = parent;
+        }
+        return false;
+    };
+    QString problem;
+    for (const auto folder_id : folders) {
+        if (folder_id == destination || contains(folder_id, destination)) {
+            problem = QStringLiteral("A folder can't be moved into itself.");
+            continue;
+        }
+        auto moved = vault_->move_folder(folder_id, destination);
+        if (!moved) {
+            problem = vaultErrorText(moved.error());
+        }
+    }
+    for (const auto video_id : videos) {
+        auto moved = vault_->move_video(video_id, destination);
+        if (!moved) {
+            problem = vaultErrorText(moved.error());
+        }
+    }
+    if (!problem.isEmpty()) {
+        setError(galleryStatus_, problem);
+        galleryStatus_->setVisible(true);
+    } else {
+        setError(galleryStatus_, {});
+    }
+    refreshGallery();
+}
+
+bool MainWindow::handleExplorerDrag(QObject* watched, QEvent* event) {
+    const bool on_details = detailsTree_ != nullptr
+        && (watched == detailsTree_ || watched == detailsTree_->viewport());
+    const bool on_icons = iconList_ != nullptr
+        && (watched == iconList_ || watched == iconList_->viewport());
+    auto* crumb = qobject_cast<QPushButton*>(watched);
+    const bool on_crumb = crumb != nullptr && crumb->property("mvpDropFolder").isValid();
+    if (!on_details && !on_icons && !on_crumb) {
+        return false;
+    }
+    if (event->type() == QEvent::DragLeave) {
+        highlightDropFolder(0, false);
+        return false;
+    }
+    if (event->type() != QEvent::DragEnter && event->type() != QEvent::DragMove
+        && event->type() != QEvent::Drop) {
+        return false;
+    }
+    auto* drop = static_cast<QDropEvent*>(event);
+    const bool internal = drop->source() == detailsTree_ || drop->source() == iconList_;
+    const bool external = drop->mimeData()->hasUrls();
+    if (!internal && !external) {
+        return false;
+    }
+
+    std::int64_t destination = currentFolderId_;
+    bool on_folder = false;
+    if (on_crumb) {
+        destination = crumb->property("mvpDropFolder").toLongLong();
+        on_folder = true;
+    } else if (on_details) {
+        QPoint pos = drop->pos();
+        if (watched == detailsTree_) {
+            pos = detailsTree_->viewport()->mapFrom(detailsTree_, pos);
+        }
+        auto* item = detailsTree_->itemAt(pos);
+        if (item != nullptr) {
+            const int kind = item->data(0, Qt::UserRole + 12).toInt();
+            const auto role = item->data(0, Qt::UserRole).toLongLong();
+            if (kind == 1) {
+                destination = -role;
+                on_folder = true;
+            } else if (kind == 2) {
+                destination = role;
+                on_folder = true;
+            }
+        }
+    } else {
+        QPoint pos = drop->pos();
+        if (watched == iconList_) {
+            pos = iconList_->viewport()->mapFrom(iconList_, pos);
+        }
+        auto* item = iconList_->itemAt(pos);
+        if (item != nullptr) {
+            const int kind = item->data(Qt::UserRole + 12).toInt();
+            const auto role = item->data(Qt::UserRole).toLongLong();
+            if (kind == 1) {
+                destination = -role;
+                on_folder = true;
+            } else if (kind == 2) {
+                destination = role;
+                on_folder = true;
+            }
+        }
+    }
+
+    const bool allow = external || (internal && on_folder && destination != currentFolderId_);
+    if (!allow) {
+        highlightDropFolder(0, false);
+        drop->ignore();
+        return true;
+    }
+    // TargetMoveAction keeps the gallery rows in place. A plain MoveAction makes
+    // Qt delete the dragged rows after the drop, which fights the refresh.
+    drop->setDropAction(internal ? Qt::TargetMoveAction : Qt::CopyAction);
+    if (event->type() != QEvent::Drop) {
+        highlightDropFolder(on_folder ? destination : -1, on_folder);
+        drop->accept();
+        return true;
+    }
+
+    highlightDropFolder(0, false);
+    if (internal) {
+        moveItemsToFolder(destination);
+    } else {
+        std::vector<std::filesystem::path> sources;
+        const auto urls = drop->mimeData()->urls();
+        for (const auto& url : urls) {
+            if (url.isLocalFile()) {
+                sources.push_back(pathFromText(url.toLocalFile()));
+            }
+        }
+        if (!sources.empty()) {
+            beginImportMany(std::move(sources), destination);
+        }
+    }
+    drop->accept();
+    return true;
 }
 
 void MainWindow::dragEnterEvent(QDragEnterEvent* event) {
@@ -1797,10 +2495,341 @@ void MainWindow::dropEvent(QDropEvent* event) {
     }
     if (!sources.empty()) {
         event->acceptProposedAction();
-        beginImportMany(std::move(sources));
+        beginImportMany(std::move(sources), currentFolderId_);
         return;
     }
     QMainWindow::dropEvent(event);
+}
+
+void MainWindow::openFolder(const std::int64_t folder_id) {
+    currentFolderId_ = folder_id < 0 ? 0 : folder_id;
+    refreshGallery();
+}
+
+void MainWindow::rebuildBreadcrumb() {
+    if (crumbLayout_ == nullptr) {
+        return;
+    }
+    while (QLayoutItem* item = crumbLayout_->takeAt(0)) {
+        delete item->widget();
+        delete item;
+    }
+    auto addButton = [this](const QString& text, const std::int64_t id, const bool current) {
+        auto* button = new QPushButton(text, crumbHost_);
+        button->setFlat(true);
+        button->setCursor(Qt::PointingHandCursor);
+        button->setAcceptDrops(true);
+        button->setProperty("mvpDropFolder", static_cast<qlonglong>(id));
+        button->installEventFilter(this);
+        button->setStyleSheet(current
+            ? QStringLiteral("QPushButton { color: white; background: transparent; border: none; padding: 2px 4px; }")
+            : QStringLiteral("QPushButton { color: #8ec8ff; background: transparent; border: none; padding: 2px 4px; }"));
+        connect(button, &QPushButton::clicked, this, [this, id] { openFolder(id); });
+        crumbLayout_->addWidget(button);
+    };
+    std::vector<std::pair<std::int64_t, QString>> chain;
+    std::int64_t id = currentFolderId_;
+    for (int guard = 0; guard < 64 && id != 0; ++guard) {
+        const core::FolderInfo* found = nullptr;
+        for (const auto& folder : folders_) {
+            if (folder.id == id) {
+                found = &folder;
+                break;
+            }
+        }
+        if (found == nullptr) {
+            break;
+        }
+        chain.push_back({id, QString::fromStdString(found->name)});
+        id = found->parent_id;
+    }
+    addButton(QStringLiteral("Library"), 0, chain.empty());
+    for (int index = static_cast<int>(chain.size()) - 1; index >= 0; --index) {
+        auto* slash = new QLabel(QStringLiteral("/"), crumbHost_);
+        slash->setStyleSheet(QStringLiteral("color: #8e8e93; background: transparent;"));
+        crumbLayout_->addWidget(slash);
+        addButton(chain[static_cast<std::size_t>(index)].second,
+            chain[static_cast<std::size_t>(index)].first, index == 0);
+    }
+    crumbLayout_->addStretch(1);
+}
+
+void MainWindow::beginNewFolder() {
+    if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
+        return;
+    }
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("New folder"), QStringLiteral("Name"),
+        QLineEdit::Normal, QString(), &accepted);
+    if (!accepted) {
+        return;
+    }
+    auto created = vault_->create_folder(currentFolderId_, name.toStdString());
+    if (!created) {
+        setError(galleryStatus_, vaultErrorText(created.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+void MainWindow::beginRenameFolder(const std::int64_t folder_id) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    QString current;
+    for (const auto& folder : folders_) {
+        if (folder.id == folder_id) {
+            current = QString::fromStdString(folder.name);
+            break;
+        }
+    }
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Rename folder"), QStringLiteral("Name"),
+        QLineEdit::Normal, current, &accepted);
+    if (!accepted) {
+        return;
+    }
+    auto renamed = vault_->rename_folder(folder_id, name.toStdString());
+    if (!renamed) {
+        setError(galleryStatus_, vaultErrorText(renamed.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+void MainWindow::beginRemoveFolder(const std::int64_t folder_id) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    QString name = QStringLiteral("this folder");
+    std::int64_t parent = 0;
+    for (const auto& folder : folders_) {
+        if (folder.id == folder_id) {
+            name = QString::fromStdString(folder.name);
+            parent = folder.parent_id;
+            break;
+        }
+    }
+    QMessageBox box(this);
+    box.setWindowTitle(QStringLiteral("Remove folder"));
+    box.setText(QStringLiteral("Remove \"%1\"?").arg(name));
+    box.setInformativeText(QStringLiteral(
+        "Videos inside move up into the folder above. The videos stay in the vault."));
+    box.setStandardButtons(QMessageBox::Cancel | QMessageBox::Ok);
+    box.button(QMessageBox::Ok)->setText(QStringLiteral("Remove folder"));
+    if (box.exec() != QMessageBox::Ok) {
+        return;
+    }
+    auto removed = vault_->remove_folder(folder_id);
+    if (!removed) {
+        setError(galleryStatus_, vaultErrorText(removed.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    std::int64_t cursor = currentFolderId_;
+    bool leaving = false;
+    for (int guard = 0; guard < 64 && cursor != 0; ++guard) {
+        if (cursor == folder_id) {
+            leaving = true;
+            break;
+        }
+        std::int64_t next = 0;
+        for (const auto& folder : folders_) {
+            if (folder.id == cursor) {
+                next = folder.parent_id;
+                break;
+            }
+        }
+        cursor = next;
+    }
+    if (leaving) {
+        currentFolderId_ = parent;
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+void MainWindow::beginRenameVideo(const std::int64_t video_id) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    QString current;
+    if (galleryStack_->currentWidget() == detailsTree_) {
+        for (int index = 0; index < detailsTree_->topLevelItemCount(); ++index) {
+            auto* item = detailsTree_->topLevelItem(index);
+            if (item->data(0, Qt::UserRole).toLongLong() == video_id
+                && item->data(0, Qt::UserRole + 12).toInt() == 0) {
+                current = item->text(0);
+                break;
+            }
+        }
+    } else if (auto* item = findListItemById(iconList_, video_id)) {
+        current = item->data(Qt::UserRole + 1).toString();
+    }
+    bool accepted = false;
+    const QString name = QInputDialog::getText(
+        this, QStringLiteral("Rename"), QStringLiteral("Name"),
+        QLineEdit::Normal, current, &accepted);
+    if (!accepted) {
+        return;
+    }
+    auto renamed = vault_->rename_video(video_id, name.toStdString());
+    if (!renamed) {
+        setError(galleryStatus_, vaultErrorText(renamed.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+void MainWindow::beginMoveSelection(const std::int64_t moving_folder_id) {
+    if (!vault_ || !vault_->is_unlocked()) {
+        return;
+    }
+    std::vector<std::int64_t> blocked;
+    if (moving_folder_id > 0) {
+        blocked.push_back(moving_folder_id);
+        for (std::size_t index = 0; index < blocked.size(); ++index) {
+            for (const auto& folder : folders_) {
+                if (folder.parent_id == blocked[index]) {
+                    blocked.push_back(folder.id);
+                }
+            }
+        }
+    }
+    auto blockedHas = [&blocked](const std::int64_t id) {
+        for (const auto id_value : blocked) {
+            if (id_value == id) {
+                return true;
+            }
+        }
+        return false;
+    };
+    auto pathFor = [this](const std::int64_t folder_id) {
+        QStringList parts;
+        std::int64_t cursor = folder_id;
+        for (int guard = 0; guard < 64 && cursor != 0; ++guard) {
+            const core::FolderInfo* found = nullptr;
+            for (const auto& folder : folders_) {
+                if (folder.id == cursor) {
+                    found = &folder;
+                    break;
+                }
+            }
+            if (found == nullptr) {
+                break;
+            }
+            parts.prepend(QString::fromStdString(found->name));
+            cursor = found->parent_id;
+        }
+        return parts.isEmpty() ? QStringLiteral("Library") : parts.join(QStringLiteral(" / "));
+    };
+
+    QDialog dialog(this);
+    dialog.setWindowTitle(QStringLiteral("Move to"));
+    dialog.setMinimumWidth(360);
+    auto* layout = new QVBoxLayout(&dialog);
+    auto* list = new QListWidget(&dialog);
+    if (!blockedHas(0)) {
+        auto* root = new QListWidgetItem(QStringLiteral("Library"), list);
+        root->setData(Qt::UserRole, static_cast<qlonglong>(0));
+    }
+    std::vector<core::FolderInfo> ordered = folders_;
+    std::sort(ordered.begin(), ordered.end(), [](const core::FolderInfo& left, const core::FolderInfo& right) {
+        return left.name < right.name;
+    });
+    for (const auto& folder : ordered) {
+        if (blockedHas(folder.id)) {
+            continue;
+        }
+        auto* item = new QListWidgetItem(pathFor(folder.id), list);
+        item->setData(Qt::UserRole, static_cast<qlonglong>(folder.id));
+    }
+    if (list->count() == 0) {
+        setError(galleryStatus_, QStringLiteral("There is nowhere else to move this."));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    list->setCurrentRow(0);
+    layout->addWidget(list);
+    auto* buttons = new QDialogButtonBox(QDialogButtonBox::Ok | QDialogButtonBox::Cancel, &dialog);
+    layout->addWidget(buttons);
+    connect(buttons, &QDialogButtonBox::accepted, &dialog, &QDialog::accept);
+    connect(buttons, &QDialogButtonBox::rejected, &dialog, &QDialog::reject);
+    connect(list, &QListWidget::itemDoubleClicked, &dialog, &QDialog::accept);
+    if (dialog.exec() != QDialog::Accepted || list->currentItem() == nullptr) {
+        return;
+    }
+    const auto destination = list->currentItem()->data(Qt::UserRole).toLongLong();
+    if (moving_folder_id > 0) {
+        auto moved = vault_->move_folder(moving_folder_id, destination);
+        if (!moved) {
+            setError(galleryStatus_, vaultErrorText(moved.error()));
+            galleryStatus_->setVisible(true);
+            return;
+        }
+    } else {
+        const auto ids = selectedVideoIds();
+        for (const auto id : ids) {
+            auto moved = vault_->move_video(id, destination);
+            if (!moved) {
+                setError(galleryStatus_, vaultErrorText(moved.error()));
+                galleryStatus_->setVisible(true);
+                refreshGallery();
+                return;
+            }
+        }
+    }
+    setError(galleryStatus_, {});
+    refreshGallery();
+}
+
+int MainWindow::selectedGalleryKind() const {
+    if (galleryStack_->currentWidget() == detailsTree_) {
+        auto* item = detailsTree_->currentItem();
+        return item == nullptr ? -1 : item->data(0, Qt::UserRole + 12).toInt();
+    }
+    auto* item = iconList_->currentItem();
+    return item == nullptr ? -1 : item->data(Qt::UserRole + 12).toInt();
+}
+
+void MainWindow::activateCurrentItem() {
+    if (galleryStack_->currentWidget() == detailsTree_) {
+        auto* item = detailsTree_->currentItem();
+        if (item == nullptr) {
+            return;
+        }
+        const int kind = item->data(0, Qt::UserRole + 12).toInt();
+        const auto id = item->data(0, Qt::UserRole).toLongLong();
+        if (kind == 1) {
+            openFolder(-id);
+        } else if (kind == 2) {
+            openFolder(id);
+        } else if (id > 0) {
+            beginPlayback(id);
+        }
+        return;
+    }
+    auto* item = iconList_->currentItem();
+    if (item == nullptr) {
+        return;
+    }
+    const int kind = item->data(Qt::UserRole + 12).toInt();
+    const auto id = item->data(Qt::UserRole).toLongLong();
+    if (kind == 1) {
+        openFolder(-id);
+    } else if (kind == 2) {
+        openFolder(id);
+    } else if (id > 0) {
+        beginPlayback(id);
+    }
 }
 
 void MainWindow::refreshGallery() {
@@ -1808,12 +2837,44 @@ void MainWindow::refreshGallery() {
     iconList_->clear();
     setError(galleryStatus_, {});
     if (!vault_ || !vault_->is_unlocked()) {
+        folders_.clear();
+        rebuildBreadcrumb();
         return;
     }
+    auto listed = vault_->list_folders();
+    if (!listed) {
+        setError(galleryStatus_, vaultErrorText(listed.error()));
+        galleryStatus_->setVisible(true);
+        return;
+    }
+    folders_ = std::move(listed.value());
+    bool open = currentFolderId_ == 0;
+    std::int64_t parentOfOpen = 0;
+    for (const auto& folder : folders_) {
+        if (folder.id == currentFolderId_) {
+            open = true;
+            parentOfOpen = folder.parent_id;
+            break;
+        }
+    }
+    if (!open) {
+        currentFolderId_ = 0;
+        parentOfOpen = 0;
+    }
+    rebuildBreadcrumb();
+    QVector<QPair<qlonglong, QString>> childFolders;
+    for (const auto& folder : folders_) {
+        if (folder.parent_id == currentFolderId_) {
+            childFolders.append(qMakePair(
+                static_cast<qlonglong>(folder.id), QString::fromStdString(folder.name)));
+        }
+    }
+    const auto openId = currentFolderId_;
     const auto generation = ++galleryGeneration_;
     const auto vault = vault_;
     auto* watcher = new QFutureWatcher<std::vector<core::VideoInfo>>(this);
-    connect(watcher, &QFutureWatcherBase::finished, this, [this, generation, vault, watcher] {
+    connect(watcher, &QFutureWatcherBase::finished, this,
+        [this, generation, vault, watcher, openId, parentOfOpen, childFolders] {
         if (generation != galleryGeneration_ || vault_ != vault
             || !vault_->is_unlocked()) {
             // A newer refresh superseded this snapshot (e.g. a delete landed
@@ -1822,9 +2883,28 @@ void MainWindow::refreshGallery() {
             return;
         }
         const auto videos = watcher->result();
+        int folderCount = 0;
+        if (openId != 0) {
+            addLibraryEntry(iconList_, detailsTree_, parentOfOpen, 2,
+                QStringLiteral(".."), QStringLiteral("Up"));
+            ++folderCount;
+        }
+        for (const auto& child : childFolders) {
+            if (!searchText_.isEmpty()
+                && !child.second.contains(searchText_, Qt::CaseInsensitive)) {
+                continue;
+            }
+            addLibraryEntry(iconList_, detailsTree_, -child.first, 1,
+                child.second, QStringLiteral("Folder"));
+            ++folderCount;
+        }
+        const int realFolders = folderCount - (openId != 0 ? 1 : 0);
         std::vector<core::VideoInfo> visible;
         visible.reserve(videos.size());
         for (const auto& video : videos) {
+            if (video.folder_id != openId) {
+                continue;
+            }
             bool tag_matches = tagFilterName_.isEmpty();
             if (!tag_matches) {
                 for (const auto& tag : video.tags) {
@@ -1881,6 +2961,11 @@ void MainWindow::refreshGallery() {
             iconItem->setData(Qt::UserRole + 6, static_cast<qlonglong>(video.original_size));
             iconItem->setData(Qt::UserRole + 9, static_cast<qlonglong>(video.imported_at));
             iconItem->setTextAlignment(Qt::AlignHCenter | Qt::AlignTop);
+            if (isAudioFileName(name)) {
+                const auto label = songLabel(name);
+                iconItem->setData(Qt::UserRole + 13, label.first);
+                iconItem->setData(Qt::UserRole + 14, label.second);
+            }
             iconItem->setToolTip(QStringLiteral("Name:%1\nSize: %2\nTags:%3\nCreated:%4").
             arg(name).
             arg(size_text).
@@ -1935,14 +3020,9 @@ void MainWindow::refreshGallery() {
                     }
                 });
             thumbWatcher->setFuture(QtConcurrent::run([vault, video_id] {
-                auto stored = vault->thumbnail(video_id);
-                // Import stores a thumbnail only when generation succeeded.
-                // Clips whose keyframe index hid the only IDR were saved with
-                // none; build one now so the gallery fills in without a
-                // manual "Regenerate thumbnail".
-                if (!stored || stored.value().bytes.empty()) {
-                    stored = vault->generate_thumbnail(video_id, 320U);
-                }
+                // display_thumbnail also replaces a stored music-note image
+                // once the song's embedded cover can be read, and keeps it.
+                auto stored = vault->display_thumbnail(video_id, 320U);
                 return std::make_shared<core::Result<core::ThumbnailInfo>>(
                     std::move(stored));
             }));
@@ -1971,6 +3051,12 @@ void MainWindow::refreshGallery() {
                             Qt::UserRole + 8,
                             static_cast<qlonglong>(info.width) * static_cast<qlonglong>(info.height));
                         iconItem->setData(Qt::UserRole + 11, QString::fromStdString(info.codec_name));
+                        if (!info.artist.empty()) {
+                            iconItem->setData(Qt::UserRole + 13, QString::fromStdString(info.artist));
+                        }
+                        if (!info.title.empty()) {
+                            iconItem->setData(Qt::UserRole + 14, QString::fromStdString(info.title));
+                        }
                         if (sortKey_ == 2 || sortKey_ == 3 || sortKey_ == 4) {
                             sortGalleryItems();
                         }
@@ -1991,14 +3077,18 @@ void MainWindow::refreshGallery() {
                     vault->media_info(video_id));
             }));
         }
-        if (videos.empty() && tagFilterName_.isEmpty() && searchText_.isEmpty()) {
-            setError(galleryStatus_, QStringLiteral("No videos imported yet."));
-        } else if (visible.empty()) {
-            setError(galleryStatus_, QStringLiteral("No videos match the current search or filter."));
+        if (visible.empty() && realFolders == 0) {
+            if (tagFilterName_.isEmpty() && searchText_.isEmpty()) {
+                setError(galleryStatus_, openId == 0
+                    ? QStringLiteral("No videos imported yet.")
+                    : QStringLiteral("This folder is empty."));
+            } else {
+                setError(galleryStatus_, QStringLiteral("No videos match the current search or filter."));
+            }
         }
         sortGalleryItems();
-        statusCountLabel_->setText(QStringLiteral("%1 videos · %2 MB")
-            .arg(visible.size())
+        statusCountLabel_->setText(QStringLiteral("%1 items · %2 MB")
+            .arg(visible.size() + realFolders)
             .arg(static_cast<double>(total_bytes) / (1024.0 * 1024.0), 0, 'f', 1));
         watcher->deleteLater();
     });
@@ -2014,13 +3104,13 @@ void MainWindow::refreshGallery() {
 std::int64_t MainWindow::selectedVideoId() const {
     if (galleryStack_->currentWidget() == detailsTree_) {
         auto* item = detailsTree_->currentItem();
-        if (item == nullptr) {
+        if (item == nullptr || item->data(0, Qt::UserRole + 12).toInt() != 0) {
             return -1;
         }
         return item->data(0, Qt::UserRole).toLongLong();
     }
     auto* item = iconList_->currentItem();
-    if (item == nullptr) {
+    if (item == nullptr || item->data(Qt::UserRole + 12).toInt() != 0) {
         return -1;
     }
     return item->data(Qt::UserRole).toLongLong();
@@ -2104,6 +3194,15 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
     if (title.isEmpty()) {
         title = QStringLiteral("Video");
     }
+    if (isAudioFileName(title)) {
+        beginMusic(video_id);
+        return;
+    }
+    if (musicWindow_ != nullptr) {
+        auto* dying = musicWindow_;
+        musicWindow_ = nullptr;
+        dying->close();
+    }
 
     auto applyClip = [&](PlayerWindow* window) {
         window->presentClip(title, index, count, hasPrevious, hasNext);
@@ -2143,6 +3242,63 @@ void MainWindow::beginPlayback(const std::int64_t video_id) {
     embedPlayer();
 }
 
+void MainWindow::beginMusic(const std::int64_t video_id) {
+    if (!vault_ || !vault_->is_unlocked() || video_id <= 0) {
+        return;
+    }
+    if (playerWindow_ != nullptr) {
+        auto* dying = playerWindow_;
+        playerWindow_ = nullptr;
+        dying->close();
+    }
+    const bool details = galleryStack_ != nullptr && galleryStack_->currentWidget() == detailsTree_;
+    const int items = details
+        ? (detailsTree_ != nullptr ? detailsTree_->topLevelItemCount() : 0)
+        : (iconList_ != nullptr ? iconList_->count() : 0);
+    std::vector<MusicTrack> queue;
+    int start = 0;
+    for (int i = 0; i < items; ++i) {
+        const int kind = details
+            ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole + 12).toInt()
+            : iconList_->item(i)->data(Qt::UserRole + 12).toInt();
+        const qlonglong id = details
+            ? detailsTree_->topLevelItem(i)->data(0, Qt::UserRole).toLongLong()
+            : iconList_->item(i)->data(Qt::UserRole).toLongLong();
+        const QString name = details
+            ? detailsTree_->topLevelItem(i)->text(0)
+            : iconList_->item(i)->data(Qt::UserRole + 1).toString();
+        if (kind != 0 || id <= 0 || !isAudioFileName(name)) {
+            continue;
+        }
+        if (id == video_id) {
+            start = static_cast<int>(queue.size());
+        }
+        queue.push_back(MusicTrack{id, name});
+    }
+    if (queue.empty()) {
+        queue.push_back(MusicTrack{video_id, QStringLiteral("Audio")});
+    }
+    if (musicWindow_ != nullptr) {
+        musicWindow_->playQueue(vault_, queue, start);
+        musicWindow_->show();
+        return;
+    }
+    auto* window = new MusicWindow(centralWidget());
+    window->setAttribute(Qt::WA_DeleteOnClose);
+    connect(window, &QObject::destroyed, this, [this, window] {
+        if (musicWindow_ == window) {
+            musicWindow_ = nullptr;
+        }
+        QTimer::singleShot(0, this, [this] { restoreGalleryFocus(); });
+    });
+    if (auto* layout = qobject_cast<QVBoxLayout*>(centralWidget()->layout())) {
+        layout->addWidget(window);
+    }
+    musicWindow_ = window;
+    window->playQueue(vault_, queue, start);
+    window->show();
+}
+
 void MainWindow::stepPlayback(const int delta) {
     if (playerWindow_ == nullptr || delta == 0) {
         return;
@@ -2172,7 +3328,7 @@ void MainWindow::stepPlayback(const int delta) {
     beginPlayback(nextId);
 }
 
-void MainWindow::beginRemoveSelected() {
+void MainWindow::beginRemoveSelected(const bool ask) {
     if (!vault_ || !vault_->is_unlocked() || batchBusy_) {
         return;
     }
@@ -2183,13 +3339,15 @@ void MainWindow::beginRemoveSelected() {
         galleryStatus_->setVisible(true);
         return;
     }
-    const auto confirm = QMessageBox::question(
-        this, QStringLiteral("Remove videos"),
-        QStringLiteral("Remove %1 video(s) from the vault? This cannot be undone.")
-            .arg(ids.size()),
-        QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
-    if (confirm != QMessageBox::Yes) {
-        return;
+    if (ask) {
+        const auto confirm = QMessageBox::question(
+            this, QStringLiteral("Remove videos"),
+            QStringLiteral("Remove %1 video(s) from the vault? This cannot be undone.")
+                .arg(ids.size()),
+            QMessageBox::Yes | QMessageBox::No, QMessageBox::No);
+        if (confirm != QMessageBox::Yes) {
+            return;
+        }
     }
     batchBusy_ = true;
     batchLabel_ = QStringLiteral("Removing");
@@ -2292,62 +3450,6 @@ void MainWindow::finishChangePassword() {
     galleryStatus_->setVisible(true);
 }
 
-void MainWindow::beginGenerateThumbnail(const std::vector<std::int64_t>& ids) {
-    if (!vault_ || !vault_->is_unlocked()) {
-        return;
-    }
-    auto targets = ids;
-    if (targets.empty()) {
-        targets = selectedVideoIds();
-    }
-    if (targets.empty()) {
-        setError(galleryStatus_, QStringLiteral("Select one or more videos to thumbnail."));
-        galleryStatus_->setVisible(true);
-        return;
-    }
-    const auto vault = vault_;
-    const auto shared_ids = std::make_shared<std::vector<std::int64_t>>(std::move(targets));
-    importButton_->setEnabled(false);
-    importFolderButton_->setEnabled(false);
-    settingsButton_->setEnabled(false);
-    galleryStatus_->setText(QStringLiteral("Generating thumbnails…"));
-    galleryStatus_->setVisible(true);
-    thumbnailWatcher_ =
-        new QFutureWatcher<std::shared_ptr<core::Result<int>>>(this);
-    connect(thumbnailWatcher_, &QFutureWatcherBase::finished, this,
-        [this] { finishGenerateThumbnail(); });
-    thumbnailWatcher_->setFuture(QtConcurrent::run([vault, shared_ids] {
-        int regenerated = 0;
-        for (const auto video_id : *shared_ids) {
-            auto outcome = vault->generate_thumbnail(video_id, 320U);
-            if (outcome) {
-                ++regenerated;
-            }
-        }
-        return std::make_shared<core::Result<int>>(regenerated);
-    }));
-}
-
-void MainWindow::finishGenerateThumbnail() {
-    auto* completed = thumbnailWatcher_;
-    thumbnailWatcher_ = nullptr;
-    const auto outcome = *completed->result();
-    completed->deleteLater();
-    importButton_->setEnabled(true);
-    importFolderButton_->setEnabled(true);
-    settingsButton_->setEnabled(true);
-    if (!outcome) {
-        const QString message =
-            QString::fromUtf8(core::user_message(outcome.error().code).data());
-        setError(galleryStatus_, message);
-        return;
-    }
-    galleryStatus_->setText(
-        QStringLiteral("Regenerated %1 thumbnail(s).").arg(outcome.value()));
-    galleryStatus_->setVisible(true);
-    refreshGallery();
-}
-
 void MainWindow::setBusy(const bool busy) {
     createButton_->setEnabled(!busy);
     unlockButton_->setEnabled(!busy);
@@ -2420,6 +3522,16 @@ void MainWindow::lockVault() {
     autoLockTimer_->stop();
     // Sharing stays up. The phone keeps its own unlocked vault until Stop sharing.
     std::filesystem::path root;
+    if (playerWindow_ != nullptr) {
+        auto* dying = playerWindow_;
+        playerWindow_ = nullptr;
+        dying->close();
+    }
+    if (musicWindow_ != nullptr) {
+        auto* dying = musicWindow_;
+        musicWindow_ = nullptr;
+        dying->close();
+    }
     if (vault_) {
         root = vault_->root_path();
         vault_->lock();
@@ -2433,13 +3545,22 @@ void MainWindow::lockVault() {
     tagFilterId_ = -1;
     tagFilterName_.clear();
     searchText_.clear();
+    currentFolderId_ = 0;
+    folders_.clear();
     showLogin(root);
 }
 
 void MainWindow::resetAutoLock() {
-    if (vault_ && vault_->is_unlocked()) {
-        autoLockTimer_->start();
+    if (autoLockTimer_ == nullptr) {
+        return;
     }
+    const int interval = autoLockMilliseconds();
+    if (!vault_ || !vault_->is_unlocked() || interval <= 0) {
+        autoLockTimer_->stop();
+        return;
+    }
+    autoLockTimer_->setInterval(interval);
+    autoLockTimer_->start();
 }
 
 void MainWindow::setError(QLabel* label, const QString& message) {

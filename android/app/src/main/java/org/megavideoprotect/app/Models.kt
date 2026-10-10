@@ -14,6 +14,7 @@ data class VideoEntry(
     val codec: String,
     val tags: List<String>,
     val importedAt: Long,
+    val folderId: Long = 0,
 ) {
     val resolution: String get() = if (width > 0 && height > 0) "${width}×${height}" else "—"
     val durationText: String get() {
@@ -41,6 +42,9 @@ data class VideoEntry(
 
 data class TagEntry(val id: Long, val name: String, val videoCount: Long)
 
+/** A virtual folder. parentId 0 is the library root. */
+data class FolderEntry(val id: Long, val parentId: Long, val name: String)
+
 /** One playable gallery row, in the order the player should step through. */
 data class PlayItem(val id: Long, val name: String)
 
@@ -64,8 +68,19 @@ object Json {
                     codec = o.optString("codec", ""),
                     tags = tags,
                     importedAt = o.optLong("importedAt", 0),
+                    folderId = o.optLong("folderId", 0),
                 )
             )
+        }
+        return out
+    }
+
+    fun folders(raw: String): List<FolderEntry> {
+        val out = ArrayList<FolderEntry>()
+        val arr = JSONArray(raw)
+        for (i in 0 until arr.length()) {
+            val o = arr.getJSONObject(i)
+            out.add(FolderEntry(o.getLong("id"), o.optLong("parentId", 0), o.getString("name")))
         }
         return out
     }
@@ -92,4 +107,12 @@ sealed interface Screen {
     ) : Screen
     /** A still image: shown in the image viewer, not the media player. */
     data class Image(val videoId: Long, val name: String) : Screen
+    /** Audio: a now-playing page, not the video feed. */
+    data class Music(
+        val videoId: Long,
+        val name: String,
+        val playlist: List<PlayItem> = emptyList(),
+        /** False when reopening the page for music that is already playing. */
+        val startFresh: Boolean = true,
+    ) : Screen
 }
